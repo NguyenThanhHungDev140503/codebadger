@@ -204,7 +204,7 @@ WORKSPACE_ROOT = "/tmp/codebadger"
 CLEANUP_ON_SHUTDOWN = True
 
 # Joern server pool (LRU eviction)
-MAX_ACTIVE_JOERN_SERVERS = 16
+MAX_ACTIVE_JOERN_SERVERS = 1
 JOERN_EVICTION_POLICY = "lru"
 
 # Worker mode. "shared" = run all Joern query servers as processes
@@ -228,11 +228,11 @@ JOERN_WORKER_PORT_MAX = 14999
 # (MB), evicting LRU servers to make room — instead of a fixed server count.
 # 0 = auto-derive from host RAM at startup (see src/utils/recommend.py); the
 # count cap above then acts only as a safety ceiling.
-JOERN_MEMORY_BUDGET_MB = 0
+JOERN_MEMORY_BUDGET_MB = 5120
 
 # Evict the LRU server when the container's RSS exceeds this (MB). A backstop
 # on top of the reservation ledger. 0 = auto-derive from host RAM at startup.
-JOERN_RSS_EVICTION_THRESHOLD_MB = 0
+JOERN_RSS_EVICTION_THRESHOLD_MB = 9216
 
 # Idle reaping. A Joern query worker that hasn't served a query for this many
 # seconds is offloaded (container torn down, CPG marked SLEEPING) so it stops
@@ -256,10 +256,10 @@ JOERN_VERIFY_TIMEOUT_SECONDS = 60
 JOERN_LOAD_MAX_ATTEMPTS = 3
 
 # MCP connection concurrency limit
-MAX_MCP_CONNECTIONS = 16
+MAX_MCP_CONNECTIONS = 11
 
 # CPG build queue
-CPG_BUILD_WORKERS = 4
+CPG_BUILD_WORKERS = 2
 # Max heap (GB) for each CPG-build frontend (c2cpg/javasrc2cpg/...). CRITICAL:
 # without this the frontend JVM defaults its heap to ~25% of the container limit
 # (~25 GB on a 100 GB cap), and N concurrent unbounded frontends exhaust host

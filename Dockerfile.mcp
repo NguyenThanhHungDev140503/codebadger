@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python deps first for layer caching.
+# python:3.13-slim doesn't ship setuptools; install it explicitly
+# so packages that need pkg_resources can build.
+RUN pip install --no-cache-dir setuptools wheel
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

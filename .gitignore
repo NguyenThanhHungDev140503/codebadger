@@ -145,3 +145,4 @@ codebadger.db
 docker-compose.override.yml
 scripts/backfill_overlays.sh
 .claude/settings.json
+.idea

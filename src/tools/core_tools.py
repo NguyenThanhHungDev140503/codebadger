@@ -1288,6 +1288,76 @@ async def _generate_cpg_async(
         # enforce the configured generation_timeout and keep the event loop responsive.
         generation_timeout = config.cpg.generation_timeout if config else 600
         loop = asyncio.get_running_loop()
+        # Pre-frontend cleanup: remove directories known to break the C# native
+        # AST generator (dotnetastgen-linux) which scans ALL files in the input
+        # tree — including .git, grammars (31 MB tree-sitter parser.c), Logs/
+        # with multi-MB log files, nested bin/obj/ with DLL/PDB blobs, and
+        # nested tmp/artifacts from previous source copies — BEFORE they reach
+        # the frontend binary.  These are never needed for CPG generation, and
+        # omitting them prevents hangs (dotnetastgen chokes on the large C file
+        # and on non-Windows PDBs) and redundant CPU/wall time.  The Joern
+        # --exclude-regex option only filters at the post-AST-parse level, so it
+        # cannot prevent the native binary from trying to process every file first.
+        #
+        # Top-level dirs are removed directly; bin/ and obj/ may be nested inside
+        # any project subdirectory, so we use `find -type d -name` to catch them
+        # at all depths.
+        container_codebase = f"/playground/codebases/{codebase_hash}"
+        _rm_top = (".git", "grammars", "Logs", "logs", "codebases", "cpgs")
+        for jd in _rm_top:
+            try:
+                container.exec_run(["rm", "-rf", f"{container_codebase}/{jd}"], stream=False)
+            except Exception:
+                pass
+        # Remove nested bin/ and obj/ directories at ANY depth (e.g.
+        # WebApi/bin/Debug/, Application/obj/Release/, Tests/obj/...).
+        try:
+            container.exec_run(
+                ["/bin/sh", "-c",
+                 f"find {container_codebase} -type d \\( -name bin -o -name obj \\) -exec rm -rf {{}} + 2>/dev/null"],
+                stream=False,
+            )
+        except Exception:
+            pass
+
+        # Scoping via include_globs: the csharpsrc2cpg frontend has a bug where
+        # --exclude-regex causes DotNetAstGenRunner to fail parsing ALL .cs files,
+        # yielding an empty CPG.  Workaround: physically delete out-of-scope
+        # directories from the container snapshot so csharpsrc2cpg never sees
+        # files it should skip.  Only applies when include_globs is present AND
+        # the frontend is csharp (the only one known to be affected).
+        if include_globs and language == "csharp":
+            scope_dirs = set()
+            for g in include_globs:
+                parts = g.lstrip("./").split("/", 1)
+                if parts:
+                    scope_dirs.add(parts[0])
+            rm_script = (
+                f"cd {container_codebase} && "
+                "for d in */; do "
+                f'  d="${{d%/}}"; '
+                f'  case "$d" in ' + " ".join(f'{sd}) : ;;' for sd in scope_dirs) + " *) rm -rf \"$d\";; esac; "
+                "done"
+            )
+            try:
+                container.exec_run(["/bin/sh", "-c", rm_script], stream=False)
+            except Exception:
+                pass
+            # Remove the scope exclude-regex since we handled it via cleanup.
+            # This avoids the csharpsrc2cpg --exclude-regex bug.
+            try:
+                while "--exclude-regex" in cmd:
+                    idx = cmd.index("--exclude-regex")
+                    # pop both the flag and its value
+                    cmd.pop(idx + 1)
+                    cmd.pop(idx)
+            except (ValueError, IndexError):
+                pass
+            logger.info(
+                f"Scoped via directory cleanup ({len(scope_dirs)} dirs kept); "
+                f"removed --exclude-regex from command to avoid csharpsrc2cpg bug"
+            )
+
         # Worker has claimed the job and is now parsing the source (c2cpg frontend).
         _set_build_phase(services, codebase_hash, "frontend")
         try:
