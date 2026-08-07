@@ -21,7 +21,7 @@ RUN mkdir -p ${JOERN_HOME} && \
     echo "Downloading Joern v${JOERN_VERSION} (~500MB, this may take a while)..." && \
     wget -q --show-progress --retry-connrefused --tries=10 \
         -O joern-cli.zip \
-        "https://github.com/joernio/joern/releases/download/v${JOERN_VERSION}/joern-cli.zip" && \
+        "https://github.com/joernio/joern/releases/download/v${JOERN_VERSION}/joern-cli-linux-x86_64.zip" && \
     echo "Extracting..." && \
     unzip -qo joern-cli.zip -d ${JOERN_HOME} && \
     rm joern-cli.zip && \

@@ -24,16 +24,18 @@ flowchart TB
 - Disk for the `playground/` volume (cloned sources + CPG `.bin` caches can reach tens of GB) and RAM for the Joern JVMs (see [Sizing](#sizing-for-your-host)).
 - `git` is only needed if you clone this repo to the host; everything else runs in containers.
 
-## Quick start (full stack)
+## Quick start: development (build locally)
+
+For local development and testing, build images directly on your machine:
 
 ```bash
 # 1. Get the code
-git clone http://github.com/lekssays/codebadger && cd codebadger
+git clone https://github.com/lekssays/codebadger && cd codebadger
 
-# 2. Configure for your host: copy the template and edit
-cp .env.example .env
-#   Set at minimum:
-#     PLAYGROUND_HOST_PATH=/abs/path/to/codebadger/playground   # ABSOLUTE
+# 2. Configure: copy .env.defaults → .env (one-time; .env is gitignored)
+cp .env.defaults .env
+#   Edit if needed:
+#     PLAYGROUND_HOST_PATH=/abs/path/to/codebadger/playground   # ABSOLUTE (or keep ./playground for dev)
 #     MCP_HOST=0.0.0.0                                           # or 127.0.0.1 behind a proxy
 #   Size memory for your host (RAM is the binding constraint):
 python scripts/recommend_config.py        # prints JOERN_MEM_LIMIT / JOERN_MEMORY_BUDGET_MB to set
@@ -55,6 +57,96 @@ To run Compose directly without the script, just make sure that path is absolute
 ```bash
 PLAYGROUND_HOST_PATH="$PWD/playground" docker compose up -d --build
 ```
+
+## Production deployment (immutable images via GHCR)
+
+For production, images are built once on a dev/CI machine and pushed to
+**GitHub Container Registry (GHCR)**. The VPS only pulls and runs — no build
+toolchain, no source code on the server, instant rollback.
+
+```mermaid
+flowchart LR
+    DEV[Dev machine] -->|docker build| IMG[codebadger-mcp<br/>codebadger-joern-server]
+    IMG -->|docker push| GHCR[(GHCR<br/>ghcr.io/user/)]
+    GHCR -->|docker compose pull| VPS[VPS]
+    VPS -->|up -d --no-build| RUN[Running stack]
+    VPS -.->|rollback.sh| ROLL[Previous tag]
+```
+
+### One-time setup
+
+```bash
+# 1. GitHub PAT (classic token) with write:packages + read:packages
+#    Create at: https://github.com/settings/tokens
+
+# 2. Login to GHCR on dev machine + VPS
+echo "YOUR_PAT" | docker login ghcr.io -u YOUR_USERNAME --password-stdin
+ssh vps "echo 'YOUR_PAT' | docker login ghcr.io -u YOUR_USERNAME --password-stdin"
+
+# 3. First deploy creates VPS .env automatically (sets IMAGE_REGISTRY, IMAGE_TAG,
+#    PLAYGROUND_HOST_PATH, DOCKER_SOCK). No manual .env setup on VPS.
+```
+
+### Configuration: .env.defaults vs .env
+
+Configuration is split into two files so deploys never overwrite host-specific settings:
+
+| File | Git | Purpose |
+|---|---|---|
+| `.env.defaults` | Yes (tracked) | Stable defaults — ports, queue backend, memory sizing. Synced to VPS on every deploy. |
+| `.env` | No (gitignored) | Per-host overrides — paths, registry, tokens. Created once on first deploy, never overwritten. |
+
+**To change a config on VPS:** SSH in, edit `/opt/codebadger/.env`, then `docker compose up -d`. Deploys only update `IMAGE_TAG` — your custom overrides survive.
+
+**On dev machine:** `cp .env.defaults .env` (one-time). The default values match local development.
+
+Docker Compose reads `.env` for `${VAR}` interpolation. Every variable in `docker-compose.yml` has a `${VAR:-default}` fallback, so `.env` only needs to define vars that differ from the built-in defaults — typically just `PLAYGROUND_HOST_PATH`, `DOCKER_SOCK`, `IMAGE_REGISTRY`, and `IMAGE_TAG`.
+
+### Build, push, and deploy
+
+```bash
+# Build both images with git SHA tag
+./scripts/build.sh
+
+# Push to GHCR
+./scripts/push.sh
+
+# Deploy to VPS (SSH alias 'codebadger')
+IMAGE_TAG=$(git rev-parse --short HEAD) ./scripts/deploy-prod.sh
+```
+
+### Rollback
+
+```bash
+# One-command rollback to the previously deployed tag
+./scripts/rollback.sh
+```
+
+`deploy-prod.sh` saves the previous tag in `/opt/codebadger/.last-deploy` before
+every deploy. `rollback.sh` reads that file, reverts `IMAGE_TAG`, pulls the old
+image, and redeploys.
+
+### Image tag strategy
+
+- **Canonical tag:** Git short SHA (`961fa87`) — production `.env` always points
+to a specific SHA, never `latest`
+- **Convenience tag:** `latest` — tracks the most recent build, useful as a
+rollback fallback
+- **dev workflow:** Leave `IMAGE_REGISTRY` empty + `IMAGE_TAG=latest` → falls
+back to local `docker compose up -d --build`
+
+### How compose resolves images
+
+```yaml
+# docker-compose.yml (no build: blocks)
+codebadger-mcp:
+  image: ${IMAGE_REGISTRY:-}codebadger-mcp:${IMAGE_TAG:-latest}
+```
+
+| `.env` setting | Resolves to |
+|---|---|
+| `IMAGE_REGISTRY=` (empty), `IMAGE_TAG=latest` | `codebadger-mcp:latest` (local) |
+| `IMAGE_REGISTRY=ghcr.io/user/`, `IMAGE_TAG=961fa87` | `ghcr.io/user/codebadger-mcp:961fa87` (GHCR) |
 
 The MCP container uses **host networking** and mounts the Docker socket, so the
 `localhost:<published-port>` wiring (Joern servers, Postgres `55432`, Redis

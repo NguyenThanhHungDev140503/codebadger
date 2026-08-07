@@ -1,9 +1,6 @@
 services:
   codebadger-joern-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: codebadger-joern-server:latest
+    image: ${IMAGE_REGISTRY:-}codebadger-joern-server:${IMAGE_TAG:-latest}
     container_name: codebadger-joern-server
     ports:
       # Bind to loopback only for external/debug access. In pool mode the MCP
@@ -27,10 +24,7 @@ services:
   # Starts with the full stack by default. For deps-only / run-MCP-on-host dev,
   # add `--scale codebadger-mcp=0`.
   codebadger-mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
-    image: codebadger-mcp:latest
+    image: ${IMAGE_REGISTRY:-}codebadger-mcp:${IMAGE_TAG:-latest}
     container_name: codebadger-mcp
     ports:
       # Host publish for the MCP. MCP_PORT (default 4242, from .env) sets BOTH the

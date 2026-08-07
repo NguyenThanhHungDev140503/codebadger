@@ -33,7 +33,7 @@ Everything a developer or security researcher needs lives in **[docs/](docs/)**:
 | [Usage](docs/usage.md) | Connecting MCP clients, the tool catalog, and a researcher workflow. |
 | [Available Tools](docs/available-tools.md) | Every MCP tool by category, with a description of what each does. |
 | [Configuration](docs/configuration.md) | `config.yaml` / env reference, telemetry. |
-| [Deployment](docs/deployment.md) | Postgres/Redis, memory sizing, `shared` vs `pool`, large batches. |
+|| [Deployment](docs/deployment.md) | Dev setup, production deploy via GHCR immutable images, rollback, memory sizing. |
 | [Architecture](docs/architecture.md) | System design and diagrams. |
 | [Security](docs/security.md) | Threat model, trust boundaries, and production hardening. |
 | [Custom Tools](docs/custom-tools.md) | Add your own detectors. |
