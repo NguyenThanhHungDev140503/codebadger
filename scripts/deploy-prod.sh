@@ -47,7 +47,7 @@ rsync -avz --delete \
   --exclude='__pycache__/' \
   docker-compose.yml \
   .env.defaults \
-  scripts/ \
+  scripts \
   "$VPS:$VPS_APP_DIR/"
 echo "   Code synced (excluding .env)."
 
