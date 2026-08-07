@@ -23,6 +23,17 @@ codebadger and its paper - *Bridging Code Property Graphs and Language Models fo
 Program Analysis* - were accepted at the **Software Vulnerability Management
 Workshop @ ICSE 2026**. 🎉
 
+## Quick deploy
+
+```bash
+git clone https://github.com/lekssays/codebadger && cd codebadger
+cp .env.defaults .env                                    # one-time; edit if needed
+IMAGE_TAG=$(git rev-parse --short HEAD) scripts/deploy-prod.sh
+# → builds, pushes to GHCR, deploys to VPS — health check auto-verified
+```
+
+See **[docs/deployment.md](docs/deployment.md)** for the full registry-based workflow, rollback, and config management. See **[docs/deploy-flow-explained.md](docs/deploy-flow-explained.md)** for a visual walkthrough.
+
 ## Documentation
 
 Everything a developer or security researcher needs lives in **[docs/](docs/)**:
@@ -33,7 +44,8 @@ Everything a developer or security researcher needs lives in **[docs/](docs/)**:
 | [Usage](docs/usage.md) | Connecting MCP clients, the tool catalog, and a researcher workflow. |
 | [Available Tools](docs/available-tools.md) | Every MCP tool by category, with a description of what each does. |
 | [Configuration](docs/configuration.md) | `config.yaml` / env reference, telemetry. |
-|| [Deployment](docs/deployment.md) | Dev setup, production deploy via GHCR immutable images, rollback, memory sizing. |
+| [Deployment](docs/deployment.md) | Dev setup, production deploy via GHCR immutable images, rollback, memory sizing. |
+| [Deploy Flow](docs/deploy-flow-explained.md) | Visual walkthrough of the registry-based deploy pipeline. |
 | [Architecture](docs/architecture.md) | System design and diagrams. |
 | [Security](docs/security.md) | Threat model, trust boundaries, and production hardening. |
 | [Custom Tools](docs/custom-tools.md) | Add your own detectors. |

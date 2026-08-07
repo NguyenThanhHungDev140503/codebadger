@@ -64,6 +64,9 @@ For production, images are built once on a dev/CI machine and pushed to
 **GitHub Container Registry (GHCR)**. The VPS only pulls and runs — no build
 toolchain, no source code on the server, instant rollback.
 
+For a visual step-by-step walkthrough of the entire deploy process, see
+**[deploy-flow-explained.md](deploy-flow-explained.md)**.
+
 ```mermaid
 flowchart LR
     DEV[Dev machine] -->|docker build| IMG[codebadger-mcp<br/>codebadger-joern-server]
@@ -97,6 +100,8 @@ Configuration is split into two files so deploys never overwrite host-specific s
 | `.env` | No (gitignored) | Per-host overrides — paths, registry, tokens. Created once on first deploy, never overwritten. |
 
 **To change a config on VPS:** SSH in, edit `/opt/codebadger/.env`, then `docker compose up -d`. Deploys only update `IMAGE_TAG` — your custom overrides survive.
+
+**To sync config from dev machine:** edit local `.env` with VPS-appropriate values, then run `scripts/sync-env.sh`. This backs up the VPS `.env`, copies your local one over, and restarts the stack. Use this when you've tested config changes locally and want to propagate them.
 
 **On dev machine:** `cp .env.defaults .env` (one-time). The default values match local development.
 
