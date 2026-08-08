@@ -107,6 +107,21 @@ ssh "$VPS" "cd $VPS_APP_DIR && sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/' .e
 echo "→ Pulling images..."
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose pull"
 
+# Pull the GHCR ':latest' convenience tag and re-point the local
+# 'codebadger-joern-server:latest' tag at it. docker compose pull above only
+# fetches the pinned IMAGE_TAG (e.g. ghcr.io/user/codebadger-joern-server:747bdfd),
+# so without this the VPS's local 'codebadger-joern-server:latest' stays stale and
+# a pool worker falling back to the default worker image would start an OLD
+# image. Keep it in lockstep with the released SHA.
+echo "→ Syncing ':latest' convenience tags..."
+REGISTRY=$(ssh "$VPS" "cd $VPS_APP_DIR && grep '^IMAGE_REGISTRY=' .env | cut -d= -f2 | sed 's#/\$##'")
+if [[ -n "$REGISTRY" ]]; then
+  ssh "$VPS" "
+    docker pull $REGISTRY/codebadger-joern-server:latest &&
+    docker tag $REGISTRY/codebadger-joern-server:latest codebadger-joern-server:latest
+  "
+fi
+
 echo "→ Redeploying (up -d --no-build)..."
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose up -d --no-build"
 

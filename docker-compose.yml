@@ -53,6 +53,12 @@ services:
       # loopback only (e.g. when a reverse proxy / socat already fronts it).
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       JOERN_WORKER_MODE: pool
+      # Pool workers are spawned by the MCP via the host Docker daemon using the
+      # SAME image the joern-server build service runs. Derive from IMAGE_REGISTRY/
+      # IMAGE_TAG so the worker tag always matches what compose pulled (e.g. the
+      # GHCR SHA on prod) — a bare "codebadger-joern-server:latest" default would
+      # not exist on the VPS and sleeping-CPG wake would fail with ImageNotFound.
+      JOERN_WORKER_IMAGE: ${IMAGE_REGISTRY:-}codebadger-joern-server:${IMAGE_TAG:-latest}
       JOERN_PLAYGROUND_HOST_PATH: ${PLAYGROUND_HOST_PATH:-./playground}
       DATABASE_URL: postgresql://codebadger:codebadger@codebadger-postgres:5432/codebadger
       REDIS_URL: redis://codebadger-redis:6379/0
