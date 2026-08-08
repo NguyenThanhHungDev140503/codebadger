@@ -90,6 +90,9 @@ services:
       # this container — local sources live under /app/playground here.
       CHAT_DEPLOY: ${CHAT_DEPLOY:-false}
       ALLOWED_SOURCE_ROOTS: ${ALLOWED_SOURCE_ROOTS:-}
+      # Optional static token for private repo clones when the caller doesn't
+      # pass github_token per-call. Read from .env (GITHUB_TOKEN).
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     depends_on:
       codebadger-postgres:
         condition: service_healthy

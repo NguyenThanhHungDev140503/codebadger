@@ -510,6 +510,19 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
             if path.endswith(".git"):
                 path = path[:-4]
             identifier = f"gitlab:{path}:{language}"
+        elif "dev.azure.com/" in source_path:
+            # Azure DevOps URL layout: /{org}/{project}/_git/{repo}.
+            # Key off org/project/repo (drop the literal _git marker) so the
+            # cache key is stable and collision-free.
+            path = source_path.split("dev.azure.com/")[-1].strip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            segments = [s for s in path.split("/") if s]
+            if len(segments) >= 4 and segments[2] == "_git":
+                azure_id = f"{segments[0]}/{segments[1]}/{segments[3]}"
+                identifier = f"azure:{azure_id}:{language}"
+            else:
+                identifier = f"azure:{path}:{language}"
         else:
             identifier = f"github:{source_path}:{language}"
     else:
@@ -1737,10 +1750,12 @@ For git repositories, it clones the repo first. For local paths, it copies the s
 The CPG is cached by a hash of the codebase.
 
 Accepted git repositories (source_type='github'):
-  - ONLY public/private repos on github.com or gitlab.com.
+  - ONLY public/private repos on github.com, gitlab.com, or dev.azure.com.
   - The URL MUST be an https:// URL of the form:
-      https://github.com/<owner>/<repo>   or   https://gitlab.com/<owner>/<repo>
-    (gitlab nested subgroups are allowed; a trailing .git is fine).
+      https://github.com/<owner>/<repo>
+      https://gitlab.com/<owner>/<repo>            (nested subgroups allowed)
+      https://dev.azure.com/<org>/<project>/_git/<repo>
+    (a trailing .git is fine).
   - Other hosts, schemes (git://, ssh://, http://), embedded credentials, or
     custom ports are rejected. Use github_token for a private repo, do NOT embed
     the token in the URL.
@@ -1769,9 +1784,9 @@ they want the full project. Pass force=True when the user confirms the full proj
 This guard does NOT apply to GitHub URLs — size is unknown until cloned.
 
 Args:
-    source_type: One of 'local', 'github' (a github.com/gitlab.com repo), or 'snippet'.
+    source_type: One of 'local', 'github' (a github.com/gitlab.com/dev.azure.com repo), or 'snippet'.
     source_path: REQUIRED for local (absolute path) and github (an https
-                 github.com/gitlab.com URL). OPTIONAL for snippet — a short label;
+                 github.com/gitlab.com/dev.azure.com URL). OPTIONAL for snippet — a short label;
                  when omitted the server derives one from the filename/language.
     language: Programming language (java, c, cpp, python, javascript, go, etc.).
               REQUIRED for local/github. Optional for snippets that carry a
@@ -1794,13 +1809,19 @@ Notes:
     - This is an async operation. Use get_cpg_status to check progress.
     - Large codebases may take several minutes to analyze.
     - Supported languages: c, cpp, java, javascript, python, go, kotlin, csharp, php, ruby, swift.
-    - Git repos: only https://github.com/... and https://gitlab.com/... are accepted.
+    - Git repos: only https://github.com/..., https://gitlab.com/..., and
+      https://dev.azure.com/... are accepted.
 
 Examples:
     generate_cpg(
         source_type="github",
         source_path="https://gitlab.com/owner/repo",
         language="java"
+    )
+    generate_cpg(
+        source_type="github",
+        source_path="https://dev.azure.com/org/project/_git/repo",
+        language="csharp"
     )
     generate_cpg(
         source_type="snippet",
@@ -1810,7 +1831,7 @@ Examples:
     )
     async def generate_cpg(
         source_type: Annotated[str, Field(description="One of 'local', 'github', or 'snippet' (code pasted directly into the chat)")],
-        source_path: Annotated[Optional[str], Field(description="REQUIRED for local (absolute path to source directory) and github (an https URL on github.com or gitlab.com ONLY, e.g. https://github.com/user/repo — other hosts/schemes/credentials/ports are rejected). OPTIONAL for snippet: a short human label for the pasted code (e.g. a function name); when omitted the server derives one from the filename/language.")] = None,
+        source_path: Annotated[Optional[str], Field(description="REQUIRED for local (absolute path to source directory) and github (an https URL on github.com, gitlab.com, or dev.azure.com ONLY, e.g. https://github.com/user/repo or https://dev.azure.com/org/project/_git/repo — other hosts/schemes/credentials/ports are rejected). OPTIONAL for snippet: a short human label for the pasted code (e.g. a function name); when omitted the server derives one from the filename/language.")] = None,
         language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. REQUIRED for local/github. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is optional.")] = "",
         code: Annotated[Optional[str], Field(description="Required when source_type='snippet'. Wrap the code in a <code language=\"LANG\"> ... </code> tag where LANG is a supported language id, e.g. <code language=\"c\">int main(){...}</code>. Multiple blocks are concatenated but must share one language. Ignored for local/github.")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
@@ -1836,7 +1857,7 @@ Examples:
                 if not (source_path and source_path.strip()):
                     raise ValidationError(
                         f"source_path is required for source_type='{source_type}' "
-                        f"({'absolute path to the source directory' if source_type == 'local' else 'an https github.com/gitlab.com repository URL'})."
+                        f"({'absolute path to the source directory' if source_type == 'local' else 'an https github.com/gitlab.com/dev.azure.com repository URL'})."
                     )
                 if not (language and language.strip()):
                     raise ValidationError(
@@ -1844,14 +1865,14 @@ Examples:
                     )
             # Chat/hosted deployment: never expose arbitrary host filesystem paths
             # through a chat-facing MCP. Disable local sources entirely; callers
-            # must use a github.com/gitlab.com URL or paste the code as a snippet.
+            # must use a github.com/gitlab.com/dev.azure.com URL or paste the code as a snippet.
             if source_type == "local":
                 _cfg = services.get("config")
                 if _cfg and getattr(_cfg.server, "chat_deploy", False):
                     raise ValidationError(
                         "source_type='local' is disabled in this deployment. Provide a "
-                        "github.com or gitlab.com repository URL with source_type='github', "
-                        "or paste the code with source_type='snippet'."
+                        "github.com, gitlab.com, or dev.azure.com repository URL with "
+                        "source_type='github', or paste the code with source_type='snippet'."
                     )
             # For snippets the code may be wrapped in <code language="..."> tags;
             # extract the language + body from them so the snippet is
@@ -1879,6 +1900,10 @@ Examples:
             validate_language(language)
             # Validate every caller-supplied input up front (no-ops when unset).
             validate_git_branch(branch)
+            # Fall back to a statically-configured token (e.g. GITHUB_TOKEN in the
+            # container env) when the caller doesn't pass one per-call.
+            if not github_token:
+                github_token = os.environ.get("GITHUB_TOKEN") or None
             validate_github_token(github_token)
             if source_type == "snippet":
                 validate_code_snippet(code)

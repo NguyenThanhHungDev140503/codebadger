@@ -95,7 +95,12 @@ case "$CMD" in
     mkdir -p "$PLAYGROUND_HOST_PATH" "$POSTGRES_DATA_PATH" "$ROOT/logs"
     echo "Playground (host): $PLAYGROUND_HOST_PATH"
     echo "Postgres data (host): $POSTGRES_DATA_PATH"
-    "${COMPOSE[@]}" up -d --build
+    # The compose services carry no `build:` (Phase-1 immutable refactor), so
+    # `docker compose up --build` would be a no-op. Build current source into the
+    # local images explicitly first, then bring the stack up with those images.
+    "$ROOT/scripts/build-mcp.sh"
+    "$ROOT/scripts/build-joern.sh"
+    "${COMPOSE[@]}" up -d
     wait_for_health
     ;;
   down)

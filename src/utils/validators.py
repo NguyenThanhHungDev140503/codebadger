@@ -67,7 +67,13 @@ def validate_codebase_hash(codebase_hash: str) -> None:
 # localhost, cloud metadata endpoints (169.254.169.254), etc. — is rejected so a
 # repo URL can't be turned into an SSRF probe or an undefined-behavior clone.
 ALLOWED_REPO_HOSTS = frozenset(
-    {"github.com", "www.github.com", "gitlab.com", "www.gitlab.com"}
+    {
+        "github.com",
+        "www.github.com",
+        "gitlab.com",
+        "www.gitlab.com",
+        "dev.azure.com",
+    }
 )
 
 # Literal `https://<host>/` prefixes derived from the allowlist. Used as a cheap
@@ -81,7 +87,7 @@ ALLOWED_REPO_URL_PREFIXES = tuple(
 
 
 def validate_repo_url(url: str) -> bool:
-    """Strictly validate a remote git repository URL (github.com / gitlab.com).
+    """Strictly validate a remote git repository URL (github.com / gitlab.com / dev.azure.com).
 
     Hardened against SSRF and undefined clone behavior. The URL MUST:
       * be a string with no whitespace or control characters,
@@ -93,8 +99,8 @@ def validate_repo_url(url: str) -> bool:
         and excludes userinfo/port, so ``github.com@evil.com`` → host ``evil.com``
         → rejected),
       * use no non-default port,
-      * have an ``/owner/repo`` path (gitlab subgroups, i.e. extra segments, are
-        allowed).
+      * have an ``/owner/repo`` path (gitlab subgroups and the Azure
+        ``/{org}/{project}/_git/{repo}`` layout are allowed).
     """
     if not url or not isinstance(url, str):
         raise ValidationError("Repository URL must be a non-empty string")
@@ -108,7 +114,8 @@ def validate_repo_url(url: str) -> bool:
     # Literal prefix gate: the string must START with an exact allowed
     # `https://<host>/` prefix. Belt-and-suspenders with the parsed hostname
     # check below — the literal match is case-sensitive and rejects anything
-    # that isn't canonically lowercase https://github.com/ or https://gitlab.com/.
+    # that isn't canonically lowercase https://github.com/, https://gitlab.com/,
+    # or https://dev.azure.com/.
     if not url.startswith(ALLOWED_REPO_URL_PREFIXES):
         raise ValidationError(
             "Repository URL must start with one of: "
@@ -130,8 +137,8 @@ def validate_repo_url(url: str) -> bool:
 
     if parsed.hostname not in ALLOWED_REPO_HOSTS:
         raise ValidationError(
-            "Only github.com and gitlab.com repositories are supported "
-            f"(got host '{parsed.hostname}')"
+            "Only github.com, gitlab.com, and dev.azure.com repositories are "
+            f"supported (got host '{parsed.hostname}')"
         )
 
     try:
@@ -141,19 +148,21 @@ def validate_repo_url(url: str) -> bool:
     if port is not None and port != 443:
         raise ValidationError("Repository URL must not specify a non-default port")
 
-    # Path must be at least /owner/repo.
+    # Path must be at least /owner/repo. Azure DevOps uses a deeper
+    # /{org}/{project}/_git/{repo} layout, which also satisfies this check.
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     if len(parts) < 2:
         raise ValidationError(
-            "Invalid repository URL. Expected https://github.com/owner/repo "
-            "or https://gitlab.com/owner/repo"
+            "Invalid repository URL. Expected https://github.com/owner/repo, "
+            "https://gitlab.com/owner/repo, or "
+            "https://dev.azure.com/{org}/{project}/_git/{repo}"
         )
 
     return True
 
 
-# Backwards-compatible alias. The validator now also accepts gitlab.com, but the
-# old name is imported across the codebase and in tests.
+# Backwards-compatible alias. The validator now also accepts gitlab.com and
+# dev.azure.com, but the old name is imported across the codebase and in tests.
 validate_github_url = validate_repo_url
 
 

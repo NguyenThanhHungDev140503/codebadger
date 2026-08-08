@@ -64,7 +64,7 @@ SERVER_LOG_BACKUP_COUNT = 5
 
 # Chat / hosted deployment posture. When true, source_type='local' is DISABLED in
 # generate_cpg: a chat-facing MCP must never expose arbitrary host filesystem
-# paths. Callers use a github.com/gitlab.com URL or a pasted snippet instead.
+# paths. Callers use a github.com/gitlab.com/dev.azure.com URL or a pasted snippet instead.
 CHAT_DEPLOY = False
 # Optional ':'-separated allowlist of host directory roots that source_type=
 # 'local' paths must canonically resolve within. Empty = no allowlist (the

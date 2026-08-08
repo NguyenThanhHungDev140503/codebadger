@@ -202,7 +202,7 @@ class TestValidateGithubUrl:
     """Test GitHub URL validation"""
 
     def test_valid_repo_urls(self):
-        """Valid github.com / gitlab.com https URLs are accepted."""
+        """Valid github.com / gitlab.com / dev.azure.com https URLs are accepted."""
         valid_urls = [
             "https://github.com/user/repo",
             "https://github.com/user/repo.git",
@@ -213,6 +213,8 @@ class TestValidateGithubUrl:
             "https://gitlab.com/user/repo.git",
             "https://www.gitlab.com/user/repo",
             "https://gitlab.com/group/subgroup/project",  # nested gitlab group
+            "https://dev.azure.com/org/project/_git/repo",  # Azure DevOps
+            "https://dev.azure.com/org/project/_git/repo.git",
         ]
 
         for url in valid_urls:
@@ -247,6 +249,7 @@ class TestValidateGithubUrl:
             "https://localhost/user/repo",            # internal host
             "https://169.254.169.254/latest/meta",    # cloud metadata endpoint
             "https://github.com.evil.com/user/repo",  # suffix look-alike
+            "https://dev.azure.com.evil.com/org/project/_git/repo",  # suffix look-alike
             "https://github.com/user/repo\n.git",     # control char injection
         ]
 
@@ -258,8 +261,9 @@ class TestValidateGithubUrl:
         """The string must literally begin with an allowed https://host/ prefix."""
         from src.utils.validators import ALLOWED_REPO_URL_PREFIXES
 
-        # The canonical lowercase prefixes are exactly the four allowed hosts.
+        # The canonical lowercase prefixes are exactly the allowed hosts.
         assert ALLOWED_REPO_URL_PREFIXES == (
+            "https://dev.azure.com/",
             "https://github.com/",
             "https://gitlab.com/",
             "https://www.github.com/",
