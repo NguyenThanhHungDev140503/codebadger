@@ -3,9 +3,11 @@ Integration and unit tests for GitSyncService.
 """
 
 import os
+import json
 import shutil
 import subprocess
 import tempfile
+from unittest.mock import patch
 import pytest
 
 from src.services.git_sync_service import GitSyncService
@@ -63,31 +65,41 @@ async def test_git_sync_flow(temp_env):
 
     project = v_service.register_project(remote_url=repo_url, default_branch="main", owner_scope="user-1")
 
-    # Mock _do_sync or substitute file protocol for test execution
     repo_dir = temp_env["repo_dir"]
     commit_sha = temp_env["commit_sha"]
 
-    # Directly verify snapshot creation and deduplication via version service contract
-    v1, status1 = v_service.create_or_get_version(
-        project_id=project.id,
-        commit_sha=commit_sha,
-        branch="main",
-        content_digest="digest-abc",
-        build_config={"lang": "c"},
-        manifest={"file_count": 1},
-        owner_scope="user-1",
-    )
+    # Keep URL validation in the production path, but substitute the local
+    # fixture URL after registration so the actual Git fetch/checkout/promotion
+    # flow is exercised without a network dependency.
+    with patch("src.services.git_sync_service.canonicalize_repo_url", return_value=repo_dir):
+        v1, status1 = await s_service.sync_project_branch(
+            project.id, branch="main", build_config={"lang": "c"}, owner_scope="user-1"
+        )
     assert status1 == "created"
-    assert v1.commit_sha == commit_sha
+    assert v1["commit_sha"] == commit_sha
+    snapshot_ref = v1["source_snapshot_ref"]
+    assert os.path.isdir(snapshot_ref)
+    manifest = json.loads(v1["manifest"])
+    assert manifest["files"][0]["sha256"]
 
-    v2, status2 = v_service.create_or_get_version(
-        project_id=project.id,
-        commit_sha=commit_sha,
-        branch="main",
-        content_digest="digest-abc",
-        build_config={"lang": "c"},
-        manifest={"file_count": 1},
-        owner_scope="user-1",
-    )
+    with patch("src.services.git_sync_service.canonicalize_repo_url", return_value=repo_dir):
+        v2, status2 = await s_service.sync_project_branch(
+            project.id, branch="main", build_config={"lang": "c"}, owner_scope="user-1"
+        )
     assert status2 == "unchanged"
-    assert v2.id == v1.id
+    assert v2["id"] == v1["id"]
+    assert os.path.isdir(snapshot_ref)
+
+
+def test_snapshot_digest_includes_file_contents(temp_env):
+    service = temp_env["sync_service"]
+    root = os.path.join(temp_env["root"], "digest")
+    os.makedirs(root)
+    path = os.path.join(root, "same-size.txt")
+    with open(path, "wb") as output:
+        output.write(b"aaaa")
+    first, _ = service._compute_snapshot_metadata(root)
+    with open(path, "wb") as output:
+        output.write(b"bbbb")
+    second, _ = service._compute_snapshot_metadata(root)
+    assert first != second

@@ -16,7 +16,6 @@ from ..utils.validators import (
     canonicalize_repo_url,
     validate_git_branch,
     validate_github_token,
-    validate_repo_url,
 )
 from .project_version_service import ProjectVersionService
 
@@ -203,23 +202,36 @@ class GitSyncService:
             # Compute content digest and manifest
             digest, manifest = self._compute_snapshot_metadata(ws_dir)
 
-            # Promote snapshot
+            # Promote snapshot without replacing an existing immutable snapshot.
+            # The per-project lock makes this atomic within the process; an
+            # already-promoted snapshot can be reused after a prior DB failure.
             snapshot_path = os.path.join(self.snapshot_dir, f"{project_id}_{commit_sha[:12]}")
+            promoted_here = False
             if os.path.exists(snapshot_path):
-                shutil.rmtree(snapshot_path, ignore_errors=True)
+                shutil.rmtree(ws_dir, ignore_errors=True)
+            else:
+                # Both directories live under the same workspace root, so the
+                # rename is atomic and never exposes a partially copied tree.
+                os.rename(ws_dir, snapshot_path)
+                promoted_here = True
 
-            shutil.move(ws_dir, snapshot_path)
-
-            version, status = self.version_service.create_or_get_version(
-                project_id=project_id,
-                commit_sha=commit_sha,
-                branch=branch,
-                content_digest=digest,
-                build_config=cfg,
-                manifest=manifest,
-                source_snapshot_ref=snapshot_path,
-                owner_scope=owner_scope,
-            )
+            try:
+                version, status = self.version_service.create_or_get_version(
+                    project_id=project_id,
+                    commit_sha=commit_sha,
+                    branch=branch,
+                    content_digest=digest,
+                    build_config=cfg,
+                    manifest=manifest,
+                    source_snapshot_ref=snapshot_path,
+                    owner_scope=owner_scope,
+                )
+            except Exception:
+                # Do not leave a newly published orphan if catalog promotion
+                # fails. Never remove a snapshot that predated this sync.
+                if promoted_here and os.path.exists(snapshot_path):
+                    shutil.rmtree(snapshot_path, ignore_errors=True)
+                raise
 
             return version.to_dict(), status
 
@@ -232,22 +244,33 @@ class GitSyncService:
         hasher = hashlib.sha256()
         file_count = 0
         total_size = 0
+        files = []
 
         for dirpath, _, filenames in sorted(os.walk(root_dir)):
             for filename in sorted(filenames):
                 filepath = os.path.join(dirpath, filename)
                 relpath = os.path.relpath(filepath, root_dir)
-                hasher.update(relpath.encode("utf-8"))
+                if os.path.islink(filepath):
+                    raise GitOperationError(f"Repository contains unsupported symlink: {relpath}")
+
+                file_hasher = hashlib.sha256()
+                hasher.update(relpath.encode("utf-8") + b"\0")
                 file_count += 1
                 try:
                     size = os.path.getsize(filepath)
                     total_size += size
-                    hasher.update(str(size).encode("utf-8"))
+                    hasher.update(str(size).encode("ascii") + b"\0")
+                    with open(filepath, "rb") as source:
+                        while chunk := source.read(1024 * 1024):
+                            file_hasher.update(chunk)
+                            hasher.update(chunk)
                 except OSError:
-                    pass
+                    raise GitOperationError(f"Unable to read snapshot file: {relpath}")
+                files.append({"path": relpath, "size": size, "sha256": file_hasher.hexdigest()})
 
         manifest = {
             "file_count": file_count,
             "total_bytes": total_size,
+            "files": files,
         }
         return hasher.hexdigest(), manifest
