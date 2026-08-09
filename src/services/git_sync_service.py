@@ -141,22 +141,26 @@ class GitSyncService:
         os.makedirs(ws_dir, exist_ok=True)
 
         try:
-            # Construct ephemeral remote URL
+            # Construct clean remote URL (never embed credential in URL/argv)
             clean_url = canonicalize_repo_url(project.remote_url)
-            if credential:
-                from urllib.parse import urlparse
-                parsed = urlparse(clean_url)
-                auth_url = f"{parsed.scheme}://{credential}@{parsed.netloc}{parsed.path}"
-            else:
-                auth_url = clean_url
 
             # git init
             self._run_git_cmd(["init"], cwd=ws_dir, timeout=timeout, token=credential)
 
+            # Ephemeral header override for HTTP auth to avoid putting token in argv URL
+            git_config_env = {}
+            if credential:
+                import base64
+                b64_cred = base64.b64encode(f":{credential}".encode("utf-8")).decode("utf-8")
+                git_config_env["GIT_CONFIG_COUNT"] = "1"
+                git_config_env["GIT_CONFIG_KEY_0"] = "http.extraHeader"
+                git_config_env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {b64_cred}"
+
             # git fetch --depth=1 origin branch
             self._run_git_cmd(
-                ["fetch", "--depth=1", auth_url, branch],
+                ["fetch", "--depth=1", clean_url, branch],
                 cwd=ws_dir,
+                env=git_config_env,
                 timeout=timeout,
                 token=credential,
             )
