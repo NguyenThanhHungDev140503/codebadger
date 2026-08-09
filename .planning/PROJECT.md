@@ -8,6 +8,16 @@ CodeBadger is a containerized MCP (Model Context Protocol) server that gives AI 
 
 AI agents can query and analyze production codebases through CPGs with memory-safe, scalable infrastructure — enabling vulnerability discovery, taint tracking, and deep code understanding at scale.
 
+## Current Milestone: v0.7 Codebase Context Backend
+
+**Goal:** Turn CodeBadger from an MCP-only analysis surface into a backend that accepts codebases, builds versioned CPGs, and serves bounded, cited context to AI agents.
+
+**Target features:**
+- Secure archive upload and staged codebase ingestion
+- Project/version catalog with asynchronous CPG build jobs
+- REST status/lifecycle API reusing the existing Joern and durable queue infrastructure
+- Semantic context retrieval exposed through REST and MCP tools
+
 ## Requirements
 
 ### Validated
@@ -25,16 +35,17 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 
 ### Active
 
-- [ ] **DEPLOY-01**: Production Docker deployment with immutable images via GHCR registry
-- [ ] **DEPLOY-02**: Automated multi-arch image build (`linux/amd64`) and push pipeline
-- [ ] **DEPLOY-03**: VPS deployment at 160.250.4.40 with `docker compose pull` + `up` workflow
-- [ ] **DEPLOY-04**: Versioned image tags (git SHA) with rollback capability
+- [ ] Securely upload a source archive and create a versioned codebase snapshot
+- [ ] Build and track a CPG asynchronously with durable status and retry semantics
+- [ ] Retrieve compact, cited code context using symbols, lexical search, and graph relationships
+- [ ] Expose the backend lifecycle and context capabilities through authenticated REST/MCP interfaces
 
 ### Out of Scope
 
-- Kubernetes / multi-node orchestration — single VPS deployment is sufficient for current scale
-- CI/CD pipeline with full test gates — manual build + push for now, CI can be added later
-- Multi-tenant deployment — single-tenant trust domain per deployment
+- Immutable GHCR deployment and VPS rollout — deferred until the backend contract stabilizes
+- Vector database/embedding-first retrieval — hybrid lexical + CPG retrieval comes first
+- Kubernetes / multi-node orchestration — separate infrastructure milestone
+- Unrestricted raw CPGQL for untrusted agents — remains internal/admin only
 
 ## Context
 
@@ -42,7 +53,7 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 - **Deployment target:** Ubuntu VPS at 160.250.4.40, Docker Engine with Compose v2
 - **Source:** GitHub repo at `lekssays/codebadger`, currently at v0.6.2b0
 - **Existing deployment:** `docker compose up -d --build` on VPS with local source sync
-- **Goal:** Replace build-on-VPS with immutable images from GHCR for reproducible, rollback-friendly deploys
+- **Goal:** Provide an upload-to-context backend for AI agents on top of CodeBadger's existing CPG engine
 - **Data that persists:** `playground/` (repos + CPG caches), `pgdata/` (Postgres), `logs/`
 - **Data that's in images:** MCP Python app, Joern + Java/Rust runtime
 
@@ -59,7 +70,9 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Immutable Docker images with git SHA tags | Reproducible builds, instant rollback, no VPS compiler deps | — Pending |
+| Versioned project snapshots over content-addressed CPG cache | Enables repeatable agent context and deduplicated builds | — Pending |
+| ContextService hides Joern/CPGQL behind a small interface | Keeps agent-facing contracts stable while analysis evolves | — Pending |
+| Hybrid lexical + graph retrieval before embeddings | Preserves explainability and reduces infrastructure for v0.7 | — Pending |
 | GHCR as registry | Already in GitHub ecosystem, no additional service needed | — Pending |
 | Separate MCP and Joern images | Different build dependencies, independent update cadence | — Pending |
 | Persistent data outside images | CPGs, Postgres, logs survive redeploys via volume mounts | ✓ Good |
@@ -67,4 +80,4 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 
 ---
 
-*Last updated: 2026-08-05 after initialization*
+*Last updated: 2026-08-09 after starting v0.7 Codebase Context Backend*

@@ -1,24 +1,40 @@
+---
+gsd_state_version: 1.0
+milestone: v0.7
+milestone_name: Codebase Context Backend
+current_phase: 5 — Secure Ingestion & Version Catalog
+status: Planned
+last_updated: "2026-08-09T03:18:41.799Z"
+last_activity: 2026-08-09 — v0.7 roadmap created
+progress:
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
 # State: CodeBadger
 
-**Last Activity:** 2026-08-05 — Project initialized
-**Current Phase:** 1 — Production Docker Deployment (Immutable Images)
+**Last Activity:** 2026-08-09 — v0.7 roadmap created
+**Current Phase:** 5 — Secure Ingestion & Version Catalog
 **Status:** Planned
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-05)
+See: .planning/PROJECT.md (updated 2026-08-09)
 
 **Core value:** AI agents can query and analyze production codebases through CPGs with memory-safe, scalable infrastructure
-**Current focus:** Phase 1 — Replace build-on-VPS with immutable images from GHCR
+**Current focus:** Phase 5 — Securely ingest and version source archives
 
 ## Phase Status
 
 | Phase | Name | Status | Plans | Progress |
 |-------|------|--------|-------|----------|
-| 1 | Production Docker Deployment | Planned | 0/0 | 0% |
-| 2 | CI/CD Pipeline | Pending | — | — |
-| 3 | Multi-Host Scheduling | Pending | — | — |
-| 4 | Findings as First-Class Data | Pending | — | — |
+| 5 | Secure Ingestion & Version Catalog | Planned | 0/? | 0% |
+| 6 | Durable CPG Lifecycle & Backend Contract | Pending | — | — |
+| 7 | Cited Hybrid Context Retrieval | Pending | — | — |
+| 8 | Authorization, Quotas & Production Verification | Pending | — | — |
 
 ## Completed Milestones
 
@@ -27,4 +43,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 
 ---
 
-*State updated: 2026-08-05 after initialization*
+*State updated: 2026-08-09 after v0.7 roadmap creation*
+
+## Current Position
+
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-08-08 — Milestone v0.7 started

@@ -1,85 +1,78 @@
-# Requirements: CodeBadger
+# Requirements: CodeBadger v0.7 Codebase Context Backend
 
-**Defined:** 2026-08-05
-**Core Value:** AI agents can query and analyze production codebases through CPGs with memory-safe, scalable infrastructure
+**Defined:** 2026-08-09
+**Core Value:** AI agents can obtain bounded, cited, source-backed context from an immutable codebase version through a stable backend contract.
 
 ## v1 Requirements
 
-### Deployment
+### Ingestion & Catalog
 
-- [ ] **DEPLOY-01**: Docker images are built as immutable artifacts tagged by git SHA (e.g. `ghcr.io/lekssays/codebadger-mcp:a1b2c3d`), not `latest`
-- [ ] **DEPLOY-02**: Multi-arch build targets `linux/amd64` to match VPS architecture
-- [ ] **DEPLOY-03**: Images are pushed to GHCR (GitHub Container Registry) from dev machine or CI
-- [ ] **DEPLOY-04**: VPS pulls images via `docker compose pull` and redeploys with `docker compose up -d --no-build`
-- [ ] **DEPLOY-05**: Rollback is achievable by changing `IMAGE_TAG` to a previous SHA and re-running `pull`/`up`
-- [ ] **DEPLOY-06**: Compose file references images (not `build:` context) for production
+- [ ] **INGEST-01**: An authenticated client can register a GitHub, GitLab, or Azure DevOps remote plus selected branch and explicitly synchronize it without waiting for CPG generation.
+- [ ] **INGEST-02**: The system creates an immutable project version from the resolved commit SHA with content digest, manifest summary, language/build configuration, and lifecycle timestamps.
+- [ ] **INGEST-03**: The system validates provider URL and branch, uses Git CLI only in an isolated workspace, keeps encrypted credentials out of URLs/config/logs/responses, and returns the existing version when the resolved commit/config is unchanged.
 
-### Configuration
+### CPG Lifecycle
 
-- [ ] **CONF-01**: `.env` file with `IMAGE_TAG` variable controls which image version is deployed
-- [ ] **CONF-02**: `docker-compose.yml` uses `${IMAGE_TAG}` for both MCP and Joern image tags
-- [ ] **CONF-03**: VPS has `docker login` to GHCR with a GitHub PAT for private image access
+- [ ] **CPG-01**: A version can enqueue exactly one durable CPG build using the existing Postgres queue and Joern worker pool.
+- [ ] **CPG-02**: Clients can observe stable queued/building/loading/ready/failed/cancelled states with phase, queue position, elapsed time, retry count, and sanitized errors.
+- [ ] **CPG-03**: Failed builds can be retried idempotently, cancellable work cleans partial artifacts, and startup reconciliation repairs interrupted jobs.
+- [ ] **CPG-04**: Equivalent source content and build options reuse the existing content-addressed CPG cache without mutating a ready version.
 
-### Data Integrity
+### Backend API
 
-- [ ] **DATA-01**: All persistent data (`playground/`, `pgdata/`, `logs/`) survive redeploys via volume mounts
-- [ ] **DATA-02**: `pgdata/` remains outside `playground/` (security — Joern containers mount playground)
-- [ ] **DATA-03**: Existing deployed CPGs and Postgres catalog continue working after image-based deploy
+- [ ] **API-01**: REST endpoints support project creation, archive upload, version listing/detail, build/status, and deletion.
+- [ ] **API-02**: MCP lifecycle tools call the same application services and return IDs/status schemas compatible with REST.
+- [ ] **API-03**: Authentication, project/version authorization, and an audit record protect every public lifecycle and context operation.
+- [ ] **API-04**: Upload/build/context operations enforce quotas, queue backpressure, correlation IDs, metrics, and sanitized operator diagnostics.
 
-### Build
+### Agent Context
 
-- [ ] **BUILD-01**: A build script or documented commands exist for building both images (`codebadger-mcp`, `codebadger-joern-server`)
-- [ ] **BUILD-02**: Build script tags images with current `git rev-parse HEAD` short SHA
-- [ ] **BUILD-03**: Build script pushes both images to GHCR
-
-### Health & Validation
-
-- [ ] **HEAL-01**: After deploy, `GET /health` returns `status: "up"` with all dependencies healthy
-- [ ] **HEAL-02**: A smoke test generates a CPG from a small snippet and queries it successfully post-deploy
+- [ ] **CTX-01**: A ready version produces an index of symbols, files, and source spans suitable for retrieval.
+- [ ] **CTX-02**: Context retrieval combines exact symbol resolution, lexical search, and bounded Joern graph expansion with ranking and deduplication.
+- [ ] **CTX-03**: Retrieval enforces item/byte/token/node/time budgets and explicitly reports truncation.
+- [ ] **CTX-04**: Every context response includes project/version identity, immutable digest, relative file path, 1-based line range, symbol when known, and selection reason.
+- [ ] **CTX-05**: Raw CPGQL remains restricted to an administrative/internal interface; public context operations expose only validated parameters.
 
 ## v2 Requirements
 
-- **CI-01**: GitHub Actions workflow auto-builds and pushes images on push to `main`
-- **CI-02**: Automated smoke test in CI pipeline after deploy
-- **MON-01**: Health check monitoring with alert on degraded state
+- **RETR-01**: Embedding/vector retrieval and reranking for large repositories.
+- **ISOL-01**: Full multi-tenant worker sandbox with per-tenant storage isolation and quotas.
+- **DIFF-01**: Version-to-version context and change-impact comparison.
+- **OPS-01**: Kubernetes or multi-host scheduling and automated deployment pipeline.
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Multi-host scheduling (roadmap "next") | Separate phase; deployment foundation needed first |
-| Findings as first-class data | Separate phase after deployment is productionized |
-| Kubernetes Helm chart | Single VPS, Docker Compose sufficient |
-| Auto-scaling worker pool | Single VPS, manual scaling adequate |
+| General code hosting, browsing UI, or collaboration workflows | v0.7 is an analysis/context backend, not a repository product. |
+| Archive upload as the primary sync mechanism | Continuously changing codebases are synchronized from their configured Git branch. |
+| Public unrestricted CPGQL | Joern's Scala execution surface is not a security boundary. |
+| Embedding-first vector database | Prove explainable lexical + graph retrieval first. |
+| Kubernetes/multi-host orchestration | Requires a separate infrastructure milestone. |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DEPLOY-01 | Phase 1 | Pending |
-| DEPLOY-02 | Phase 1 | Pending |
-| DEPLOY-03 | Phase 1 | Pending |
-| DEPLOY-04 | Phase 1 | Pending |
-| DEPLOY-05 | Phase 1 | Pending |
-| DEPLOY-06 | Phase 1 | Pending |
-| CONF-01 | Phase 1 | Pending |
-| CONF-02 | Phase 1 | Pending |
-| CONF-03 | Phase 1 | Pending |
-| DATA-01 | Phase 1 | Pending |
-| DATA-02 | Phase 1 | Pending |
-| DATA-03 | Phase 1 | Pending |
-| BUILD-01 | Phase 1 | Pending |
-| BUILD-02 | Phase 1 | Pending |
-| BUILD-03 | Phase 1 | Pending |
-| HEAL-01 | Phase 1 | Pending |
-| HEAL-02 | Phase 1 | Pending |
+| INGEST-01 | Phase 5 | Pending |
+| INGEST-02 | Phase 5 | Pending |
+| INGEST-03 | Phase 5 | Pending |
+| CPG-01 | Phase 6 | Pending |
+| CPG-02 | Phase 6 | Pending |
+| CPG-03 | Phase 6 | Pending |
+| CPG-04 | Phase 6 | Pending |
+| API-01 | Phase 6 | Pending |
+| API-02 | Phase 6 | Pending |
+| API-03 | Phase 8 | Pending |
+| API-04 | Phase 8 | Pending |
+| CTX-01 | Phase 7 | Pending |
+| CTX-02 | Phase 7 | Pending |
+| CTX-03 | Phase 7 | Pending |
+| CTX-04 | Phase 7 | Pending |
+| CTX-05 | Phase 7 | Pending |
 
-**Coverage:**
-- v1 requirements: 17 total
-- Mapped to phases: 17
-- Unmapped: 0 ✓
+**Coverage:** 16 v1 requirements; 16 mapped; 0 unmapped ✓.
 
 ---
-
-*Requirements defined: 2026-08-05*
-*Last updated: 2026-08-05 after initialization*
+*Requirements defined: 2026-08-09*
+*Last updated: 2026-08-09 after v0.7 requirements approval*
