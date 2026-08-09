@@ -99,6 +99,42 @@ class PostgresDBManager(PostgresJobStore):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_codebase ON findings(codebase_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_type ON findings(finding_type)")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    remote_url TEXT NOT NULL,
+                    default_branch TEXT NOT NULL,
+                    owner_scope TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_versions (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    build_config TEXT NOT NULL,
+                    manifest TEXT NOT NULL,
+                    source_snapshot_ref TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(project_id, commit_sha, build_config)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_credentials (
+                    project_id TEXT PRIMARY KEY,
+                    ciphertext TEXT NOT NULL,
+                    key_version TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_project_versions_project ON project_versions(project_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_project_versions_sha ON project_versions(commit_sha)")
             conn.commit()
         logger.info("Postgres catalog/cache/findings schema ready")
 

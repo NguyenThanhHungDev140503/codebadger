@@ -161,6 +161,18 @@ def validate_repo_url(url: str) -> bool:
     return True
 
 
+def canonicalize_repo_url(url: str) -> str:
+    """Canonicalize a validated repository URL into its standard form."""
+    validate_repo_url(url)
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return f"{scheme}://{host}/{path}"
+
+
 # Backwards-compatible alias. The validator now also accepts gitlab.com and
 # dev.azure.com, but the old name is imported across the codebase and in tests.
 validate_github_url = validate_repo_url

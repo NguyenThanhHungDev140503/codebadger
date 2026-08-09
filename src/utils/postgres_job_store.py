@@ -73,6 +73,33 @@ class PostgresJobStore:
 
     def _connect(self):
         """Yield a connection: from the pool (returned on exit) or a fresh one."""
+        if self.dsn.startswith("sqlite://"):
+            import sqlite3
+
+            class SqliteConnectionWrapper:
+                def __init__(self, conn):
+                    self.conn = conn
+
+                def execute(self, sql, params=()):
+                    sql_converted = sql.replace("%s", "?")
+                    return self.conn.execute(sql_converted, params)
+
+                def commit(self):
+                    return self.conn.commit()
+
+                def rollback(self):
+                    return self.conn.rollback()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    self.conn.close()
+
+            db_path = self.dsn[len("sqlite://"):]
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return SqliteConnectionWrapper(conn)
         if self._pool is not None:
             return self._pool.connection()
         return psycopg.connect(self.dsn, row_factory=dict_row, autocommit=False)
@@ -87,7 +114,8 @@ class PostgresJobStore:
             self._pool = None
 
     def init_schema(self) -> None:
-        self._open_pool()
+        if not self.dsn.startswith("sqlite://"):
+            self._open_pool()
         with self._connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
