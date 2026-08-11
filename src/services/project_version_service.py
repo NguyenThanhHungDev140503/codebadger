@@ -51,6 +51,10 @@ def compute_version_id(project_id: str, commit_sha: str, build_config: Dict[str,
 class ProjectVersionService:
     """Service to handle immutable project version catalog and credential management."""
 
+    @staticmethod
+    def compute_version_id(project_id: str, commit_sha: str, build_config: Dict[str, Any]) -> str:
+        return compute_version_id(project_id, commit_sha, build_config)
+
     def __init__(
         self,
         db_manager: PostgresDBManager,
@@ -236,8 +240,8 @@ class ProjectVersionService:
             conn.execute(
                 """
                 INSERT INTO project_versions (
-                    id, project_id, commit_sha, branch, content_digest, build_config, manifest, source_snapshot_ref, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    id, project_id, commit_sha, branch, content_digest, build_config, manifest, source_snapshot_ref, build_status, build_metadata, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     version_id,
@@ -248,6 +252,9 @@ class ProjectVersionService:
                     json.dumps(cfg),
                     json.dumps(man),
                     source_snapshot_ref,
+                    "queued",
+                    json.dumps({}),
+                    now,
                     now,
                 ),
             )
@@ -262,7 +269,10 @@ class ProjectVersionService:
                 build_config=cfg,
                 manifest=man,
                 source_snapshot_ref=source_snapshot_ref,
+                build_status="queued",
+                build_metadata={},
                 created_at=datetime.fromisoformat(now),
+                updated_at=datetime.fromisoformat(now),
             )
             return version, "created"
 
@@ -277,6 +287,141 @@ class ProjectVersionService:
                 (version_id, owner_scope),
             ).fetchone()
             return ProjectVersion.from_dict(dict(row)) if row else None
+
+    def cancel_version_build(
+        self,
+        version_id: str,
+        codebase_hash: Optional[str] = None,
+        partial_artifacts: Optional[List[str]] = None,
+        owner_scope: str = "default",
+    ) -> Tuple[ProjectVersion, bool]:
+        """Cancel an in-flight version build and clean up partial artifacts.
+
+        Raises ValueError if current build_status is 'ready' or 'failed'.
+        """
+        version = self.get_version(version_id, owner_scope)
+        if not version:
+            raise ValueError(f"Version {version_id} not found or unauthorized")
+
+        if version.build_status == "ready":
+            raise ValueError("cannot cancel a ready build")
+        if version.build_status == "failed":
+            raise ValueError("cannot cancel a failed build")
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE project_versions
+                SET build_status = 'cancelled', updated_at = %s
+                WHERE id = %s AND build_status IN ('queued', 'building', 'loading')
+                RETURNING *
+                """,
+                (now, version_id),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                # Re-check status to raise appropriate error
+                v = self.get_version(version_id, owner_scope)
+                if v and v.build_status == "ready":
+                    raise ValueError("cannot cancel a ready build")
+                if v and v.build_status == "failed":
+                    raise ValueError("cannot cancel a failed build")
+                return version, False
+
+            conn.commit()
+            cancelled_version = ProjectVersion.from_dict(dict(row))
+
+        # Cancel job in job store if active
+        if codebase_hash:
+            with self.db._connect() as conn:
+                conn.execute(
+                    "UPDATE jobs SET status = 'failed', error = 'Cancelled by user', updated_at = %s "
+                    "WHERE codebase_hash = %s AND status IN ('queued', 'running')",
+                    (now, codebase_hash),
+                )
+                conn.commit()
+
+        # Clean up partial artifacts
+        import os
+        import shutil
+        if partial_artifacts:
+            for art in partial_artifacts:
+                if os.path.isdir(art):
+                    shutil.rmtree(art, ignore_errors=True)
+                elif os.path.isfile(art):
+                    try:
+                        os.remove(art)
+                    except OSError:
+                        pass
+
+        return cancelled_version, True
+
+    def retry_version_build(
+        self,
+        version_id: str,
+        queue: Optional[Any] = None,
+        owner_scope: str = "default",
+    ) -> Tuple[ProjectVersion, str]:
+        """Retry a failed or cancelled version build idempotently.
+
+        Returns (ProjectVersion, status) where status is 'queued' or 'already_active'.
+        """
+        version = self.get_version(version_id, owner_scope)
+        if not version:
+            raise ValueError(f"Version {version_id} not found or unauthorized")
+
+        if version.build_status == "ready":
+            raise ValueError("cannot retry a ready build")
+
+        if version.build_status in ("queued", "building", "loading"):
+            return version, "already_active"
+
+        if version.build_status not in ("failed", "cancelled"):
+            raise ValueError(f"cannot retry build in status {version.build_status}")
+
+        # Increment retry_count in build_metadata
+        current_meta = dict(version.build_metadata) if isinstance(version.build_metadata, dict) else {}
+        current_retry = current_meta.get("retry_count", 0)
+        current_meta["retry_count"] = current_retry + 1
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE project_versions
+                SET build_status = 'queued', build_metadata = %s, updated_at = %s
+                WHERE id = %s AND build_status IN ('failed', 'cancelled')
+                RETURNING *
+                """,
+                (json.dumps(current_meta), now, version_id),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                v = self.get_version(version_id, owner_scope)
+                if v and v.build_status in ("queued", "building", "loading"):
+                    return v, "already_active"
+                if v and v.build_status == "ready":
+                    raise ValueError("cannot retry a ready build")
+                raise ValueError("Retry state update failed")
+
+            conn.commit()
+            updated_version = ProjectVersion.from_dict(dict(row))
+
+        # Enqueue build job if queue provided
+        if queue:
+            codebase_hash = updated_version.id
+            job = {
+                "version_id": version_id,
+                "project_id": updated_version.project_id,
+                "commit_sha": updated_version.commit_sha,
+                "branch": updated_version.branch,
+                "build_config": updated_version.build_config,
+            }
+            # Enqueue job synchronously or via submit if async context
+            self.db.enqueue_job(codebase_hash, "generate_cpg", job)
+
+        return updated_version, "queued"
 
     def list_versions(self, project_id: str, owner_scope: str = "default") -> List[ProjectVersion]:
         with self.db._connect() as conn:

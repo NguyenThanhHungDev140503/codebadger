@@ -121,10 +121,31 @@ class PostgresDBManager(PostgresJobStore):
                     build_config TEXT NOT NULL,
                     manifest TEXT NOT NULL,
                     source_snapshot_ref TEXT,
+                    build_status TEXT NOT NULL DEFAULT 'queued',
+                    build_metadata TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     UNIQUE(project_id, commit_sha, build_config)
                 )
             """)
+            if not self.dsn.startswith("sqlite://"):
+                conn.execute("ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS build_status TEXT NOT NULL DEFAULT 'queued'")
+                conn.execute("ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS build_metadata TEXT NOT NULL DEFAULT '{}'")
+                conn.execute("ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS updated_at TEXT")
+            else:
+                # SQLite ALTER TABLE support
+                try:
+                    conn.execute("ALTER TABLE project_versions ADD COLUMN build_status TEXT NOT NULL DEFAULT 'queued'")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE project_versions ADD COLUMN build_metadata TEXT NOT NULL DEFAULT '{}'")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("ALTER TABLE project_versions ADD COLUMN updated_at TEXT")
+                except Exception:
+                    pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS project_credentials (
                     project_id TEXT PRIMARY KEY,
@@ -137,6 +158,51 @@ class PostgresDBManager(PostgresJobStore):
             conn.execute("CREATE INDEX IF NOT EXISTS idx_project_versions_sha ON project_versions(commit_sha)")
             conn.commit()
         logger.info("Postgres catalog/cache/findings schema ready")
+
+    def update_version_status(
+        self,
+        version_id: str,
+        build_status: str,
+        metadata_updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Update version status and merge metadata updates atomically."""
+        now = _now()
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT build_metadata FROM project_versions WHERE id = %s",
+                    (version_id,),
+                ).fetchone()
+                if not row:
+                    return False
+
+                current_meta = {}
+                raw_meta = row["build_metadata"] if isinstance(row, dict) else row[0]
+                if raw_meta:
+                    if isinstance(raw_meta, str):
+                        try:
+                            current_meta = json.loads(raw_meta)
+                        except json.JSONDecodeError:
+                            current_meta = {}
+                    elif isinstance(raw_meta, dict):
+                        current_meta = raw_meta
+
+                if metadata_updates:
+                    current_meta.update(metadata_updates)
+
+                conn.execute(
+                    """
+                    UPDATE project_versions
+                    SET build_status = %s, build_metadata = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (build_status, json.dumps(current_meta), now, version_id),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update version status for {version_id}: {e}")
+            return False
 
     # codebases
 

@@ -67,6 +67,9 @@ toolchain, no source code on the server, instant rollback.
 For a visual step-by-step walkthrough of the entire deploy process, see
 **[deploy-flow-explained.md](deploy-flow-explained.md)**.
 
+For the automated GitHub Actions path, see
+**[github-actions-vps-flow-explained.md](github-actions-vps-flow-explained.md)**.
+
 ```mermaid
 flowchart LR
     DEV[Dev machine] -->|docker build| IMG[codebadger-mcp<br/>codebadger-joern-server]
@@ -119,6 +122,28 @@ Docker Compose reads `.env` for `${VAR}` interpolation. Every variable in `docke
 # Deploy to VPS (SSH alias 'codebadger')
 IMAGE_TAG=$(git rev-parse --short HEAD) ./scripts/deploy-prod.sh
 ```
+
+### Continuous deployment with GitHub Actions
+
+`.github/workflows/deploy-vps.yml` automatically builds the two `linux/amd64`
+images for every push to `main`, pushes their immutable full-commit-SHA tags to
+GHCR, then deploys that exact tag to the VPS. The deploy job is scoped to the
+GitHub `production` environment and never rebuilds application images on the
+server. Configure environment protection rules there if manual approval is
+desired.
+
+Create these repository/environment secrets before enabling the workflow:
+
+| Secret | Value |
+|---|---|
+| `VPS_HOST` | `root@160.250.4.40` |
+| `VPS_SSH_PRIVATE_KEY` | The private key paired with the VPS deploy key. |
+| `VPS_KNOWN_HOSTS` | The pinned `known_hosts` entry for `160.250.4.40` (obtain it from a trusted fingerprint, not a blind `ssh-keyscan`). |
+
+The workflow uses the built-in `GITHUB_TOKEN` to publish to GHCR. If the GHCR
+packages are private, log the VPS Docker daemon into `ghcr.io` once with a
+read-packages credential before the first run. Keep the MCP port loopback-only;
+the workflow sets `MCP_PUBLISH_HOST=127.0.0.1` for a newly provisioned VPS.
 
 ### Rollback
 

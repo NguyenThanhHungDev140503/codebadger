@@ -46,7 +46,7 @@ def pool(monkeypatch):
     fake.containers.list.return_value = []
     monkeypatch.setattr(jsm.docker, "from_env", lambda: fake)
     m = jsm.JoernServerManager(config=load_config())
-    m._wait_for_server = lambda port, timeout=120: True  # skip real readiness poll
+    m._wait_for_server = lambda port, timeout=120, codebase_hash=None: True  # skip real readiness poll
     return m, fake
 
 
@@ -311,10 +311,14 @@ def test_get_or_create_client_rebuilds_on_stale_port(pool, monkeypatch):
 
 
 def test_get_or_create_client_reuses_client_on_matching_port(pool, monkeypatch):
+    from src.services.joern_client import JoernServerClient
     m, _ = pool
-    good = MagicMock()
+    good = MagicMock(spec=JoernServerClient)
+    good.host = "127.0.0.1"
     good.port = 14002
+    good.session_id = "test_sess"
     m._clients["abc"] = good
+    monkeypatch.setattr(m, "_joern_endpoint", lambda h, p: ("127.0.0.1", 14002))
     monkeypatch.setattr(m, "get_server_port", lambda h: 14002)
 
     assert m.get_or_create_client("abc") is good

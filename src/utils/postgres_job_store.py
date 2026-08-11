@@ -82,6 +82,19 @@ class PostgresJobStore:
 
                 def execute(self, sql, params=()):
                     sql_converted = sql.replace("%s", "?")
+                    if "RETURNING" in sql_converted and "INSERT INTO jobs" in sql_converted:
+                        cur = self.conn.execute(sql_converted.split("RETURNING")[0], params)
+                        jid = cur.lastrowid
+                        class ReturningIdWrapper:
+                            def __init__(self, jid): self.jid = jid
+                            def fetchone(self): return {"id": self.jid}
+                            def __getitem__(self, k): return self.jid if k == "id" else None
+                        return ReturningIdWrapper(jid)
+                    if "RETURNING" in sql_converted and "UPDATE project_versions" in sql_converted:
+                        split_sql = sql_converted.split("RETURNING")[0]
+                        cur = self.conn.execute(split_sql, params)
+                        vid = params[2] if len(params) >= 3 else (params[1] if len(params) > 1 else params[0])
+                        return self.conn.execute("SELECT * FROM project_versions WHERE id = ?", (vid,))
                     return self.conn.execute(sql_converted, params)
 
                 def commit(self):
@@ -97,7 +110,7 @@ class PostgresJobStore:
                     self.conn.close()
 
             db_path = self.dsn[len("sqlite://"):]
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             return SqliteConnectionWrapper(conn)
         if self._pool is not None:
@@ -117,20 +130,36 @@ class PostgresJobStore:
         if not self.dsn.startswith("sqlite://"):
             self._open_pool()
         with self._connect() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id BIGSERIAL PRIMARY KEY,
-                    codebase_hash TEXT NOT NULL,
-                    job_type TEXT NOT NULL DEFAULT 'generate_cpg',
-                    status TEXT NOT NULL DEFAULT 'queued',
-                    payload TEXT,
-                    result TEXT,
-                    error TEXT,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
+            if self.dsn.startswith("sqlite://"):
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        codebase_hash TEXT NOT NULL,
+                        job_type TEXT NOT NULL DEFAULT 'generate_cpg',
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        payload TEXT,
+                        result TEXT,
+                        error TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+            else:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id BIGSERIAL PRIMARY KEY,
+                        codebase_hash TEXT NOT NULL,
+                        job_type TEXT NOT NULL DEFAULT 'generate_cpg',
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        payload TEXT,
+                        result TEXT,
+                        error TEXT,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)")
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_unique
@@ -186,6 +215,23 @@ class PostgresJobStore:
         now = _now()
         try:
             with self._connect() as conn:
+                if self.dsn.startswith("sqlite://"):
+                    res = conn.execute(
+                        "SELECT id FROM jobs WHERE status = 'queued' AND job_type = ? ORDER BY created_at LIMIT 1",
+                        (job_type,),
+                    ).fetchone()
+                    if not res:
+                        return None
+                    jid = res["id"]
+                    conn.execute("UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?", (now, jid))
+                    conn.commit()
+                    row = conn.execute("SELECT id, codebase_hash, job_type, payload, attempts FROM jobs WHERE id = ?", (jid,)).fetchone()
+                    if not row:
+                        return None
+                    job = dict(row)
+                    job["payload"] = json.loads(job["payload"]) if job["payload"] else {}
+                    return job
+
                 row = conn.execute(
                     "UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = %s "
                     "WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND job_type = %s "
@@ -200,7 +246,7 @@ class PostgresJobStore:
                 job["payload"] = json.loads(job["payload"]) if job["payload"] else {}
                 return job
         except Exception as e:
-            logger.error(f"Postgres claim_next_job failed: {e}")
+            logger.error(f"Postgres claim_next_job failed: {e}", exc_info=True)
             return None
 
     def complete_job(self, job_id: int, result: Optional[Any] = None) -> None:
@@ -225,13 +271,14 @@ class PostgresJobStore:
             with self._connect() as conn:
                 row = conn.execute("SELECT * FROM jobs WHERE id = %s", (job_id,)).fetchone()
                 if not row:
+                    logger.error(f"get_job: row for {job_id} is None")
                     return None
                 job = dict(row)
                 if job.get("payload"):
                     job["payload"] = json.loads(job["payload"])
                 return job
         except Exception as e:
-            logger.error(f"Postgres get_job {job_id} failed: {e}")
+            logger.error(f"Postgres get_job {job_id} failed: {e}", exc_info=True)
             return None
 
     def has_active_job(self, codebase_hash: str, job_type: str = "generate_cpg") -> bool:
@@ -293,15 +340,64 @@ class PostgresJobStore:
             logger.error(f"Postgres count_jobs failed: {e}")
             return 0
 
-    def requeue_running_jobs(self) -> int:
+    def requeue_running_jobs(self, max_retries: int = 3) -> int:
         try:
             with self._connect() as conn:
-                cur = conn.execute(
-                    "UPDATE jobs SET status = 'queued', updated_at = %s WHERE status = 'running'",
-                    (_now(),),
-                )
+                running_jobs = conn.execute(
+                    "SELECT id, codebase_hash, payload, attempts FROM jobs WHERE status = 'running'"
+                ).fetchall()
+                if not running_jobs:
+                    return 0
+
+                now = _now()
+                requeued_count = 0
+
+                for r in running_jobs:
+                    job = dict(r)
+                    jid = job["id"]
+                    attempts = job.get("attempts", 0)
+                    payload_raw = job.get("payload")
+                    version_id = None
+                    if payload_raw:
+                        try:
+                            payload_dict = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+                            if isinstance(payload_dict, dict):
+                                version_id = payload_dict.get("version_id")
+                        except Exception:
+                            pass
+
+                    if attempts >= max_retries:
+                        err_msg = "EXCEEDED_MAX_RETRIES: Job exceeded maximum startup retry attempts"
+                        conn.execute(
+                            "UPDATE jobs SET status = 'failed', error = %s, updated_at = %s WHERE id = %s",
+                            (err_msg, now, jid),
+                        )
+                        if version_id:
+                            err_meta = json.dumps({"error": {"error_code": "EXCEEDED_MAX_RETRIES", "message": "Job exceeded maximum startup retry attempts"}})
+                            conn.execute(
+                                """
+                                UPDATE project_versions
+                                SET build_status = 'failed',
+                                    build_metadata = %s,
+                                    updated_at = %s
+                                WHERE id = %s
+                                """,
+                                (err_meta, now, version_id),
+                            )
+                    else:
+                        conn.execute(
+                            "UPDATE jobs SET status = 'queued', attempts = attempts + 1, updated_at = %s WHERE id = %s",
+                            (now, jid),
+                        )
+                        if version_id:
+                            conn.execute(
+                                "UPDATE project_versions SET build_status = 'queued', updated_at = %s WHERE id = %s",
+                                (now, version_id),
+                            )
+                    requeued_count += 1
+
                 conn.commit()
-                return cur.rowcount
+                return requeued_count
         except Exception as e:
-            logger.error(f"Postgres requeue_running_jobs failed: {e}")
+            logger.error(f"Postgres requeue_running_jobs failed: {e}", exc_info=True)
             return 0

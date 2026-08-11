@@ -84,7 +84,10 @@ class ProjectVersion:
     build_config: Dict[str, Any] = field(default_factory=dict)
     manifest: Dict[str, Any] = field(default_factory=dict)
     source_snapshot_ref: Optional[str] = None
+    build_status: str = "queued"
+    build_metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -96,7 +99,10 @@ class ProjectVersion:
             "build_config": json.dumps(self.build_config) if isinstance(self.build_config, dict) else self.build_config,
             "manifest": json.dumps(self.manifest) if isinstance(self.manifest, dict) else self.manifest,
             "source_snapshot_ref": self.source_snapshot_ref,
+            "build_status": self.build_status,
+            "build_metadata": json.dumps(self.build_metadata) if isinstance(self.build_metadata, dict) else self.build_metadata,
             "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
         }
 
     @classmethod
@@ -116,6 +122,27 @@ class ProjectVersion:
             except json.JSONDecodeError:
                 manifest = {}
 
+        build_metadata = data.get("build_metadata", {})
+        if isinstance(build_metadata, str):
+            try:
+                build_metadata = json.loads(build_metadata)
+            except json.JSONDecodeError:
+                build_metadata = {}
+
+        created_at_val = data.get("created_at")
+        created_at = (
+            datetime.fromisoformat(created_at_val)
+            if isinstance(created_at_val, str)
+            else (created_at_val or datetime.now(timezone.utc))
+        )
+
+        updated_at_val = data.get("updated_at")
+        updated_at = (
+            datetime.fromisoformat(updated_at_val)
+            if isinstance(updated_at_val, str)
+            else (updated_at_val or created_at)
+        )
+
         return cls(
             id=data["id"],
             project_id=data["project_id"],
@@ -125,9 +152,10 @@ class ProjectVersion:
             build_config=build_config,
             manifest=manifest,
             source_snapshot_ref=data.get("source_snapshot_ref"),
-            created_at=datetime.fromisoformat(data["created_at"])
-            if isinstance(data.get("created_at"), str)
-            else data.get("created_at", datetime.now(timezone.utc)),
+            build_status=data.get("build_status", "queued"),
+            build_metadata=build_metadata,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
 
