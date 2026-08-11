@@ -145,6 +145,13 @@ packages are private, log the VPS Docker daemon into `ghcr.io` once with a
 read-packages credential before the first run. Keep the MCP port loopback-only;
 the workflow sets `MCP_PUBLISH_HOST=127.0.0.1` for a newly provisioned VPS.
 
+Both Docker images carry the OCI source label linking their GHCR package to this
+repository. If a package was created before that link existed, open its GitHub
+**Package settings** once and under **Manage Actions access** add
+`NguyenThanhHungDev140503/codebadger` with **Write** access. Without this grant,
+the workflow can log into GHCR but its repository-scoped `GITHUB_TOKEN` receives
+HTTP 403 while pushing layers to the pre-existing package.
+
 ### Rollback
 
 ```bash

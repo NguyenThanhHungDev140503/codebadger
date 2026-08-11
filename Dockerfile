@@ -6,6 +6,9 @@
 # other frontend's native astgen keeps working on noble.
 FROM eclipse-temurin:21-jdk-noble
 
+# Link the GHCR package to this repository for GitHub Actions GITHUB_TOKEN access.
+LABEL org.opencontainers.image.source="https://github.com/NguyenThanhHungDev140503/codebadger"
+
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
