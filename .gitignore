@@ -127,7 +127,6 @@ dmypy.json
 *.cpg
 *.bin
 config.yml
-config.yaml
 .cache/
 build.log
 
