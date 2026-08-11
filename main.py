@@ -33,6 +33,9 @@ from src.services import (
     QueryExecutor,
     CodeBrowsingService
 )
+from src.services.archive_upload_service import ArchiveUploadService
+from src.services.git_sync_service import GitSyncService
+from src.services.project_version_service import ProjectVersionService
 from src.utils import setup_logging
 from src.utils import compute_recommendation, current_from_config, render_recommendation
 from src.startup_tuning import apply_startup_tuning, container_mem_limit_mb, parse_mem_to_mb
@@ -54,7 +57,9 @@ from src.utils.postgres_db_manager import PostgresDBManager
 # docker-compose also uses), defaulting to the compose services. A missing or
 # unreachable Postgres/Redis fails the boot (fail-fast), see app_lifespan.
 from src.defaults import resolve_database_url, resolve_redis_url
+from src.api.rest_routes import register_rest_routes
 from src.tools import register_tools
+from src.tools.lifecycle_tools import register_lifecycle_tools
 
 VERSION = "0.6.2-beta"
 
@@ -539,7 +544,20 @@ async def app_lifespan(server: FastMCP):
             f"{config.cpg.build_workers} workers)"
         )
 
+        # Version-catalog services back the REST/MCP lifecycle APIs. They are
+        # initialized after the durable queue so new Git and archive versions
+        # can enqueue a CPG build immediately.
+        version_service = ProjectVersionService(db_manager)
+        services['version_service'] = version_service
+        services['git_sync_service'] = GitSyncService(
+            config.storage.workspace_root, version_service
+        )
+        services['archive_service'] = ArchiveUploadService(
+            version_service, cpg_queue
+        )
+
         register_tools(server, services)
+        register_lifecycle_tools(server, services)
 
         # Wire watchdog → shared restart registry BEFORE starting the watchdog so
         # every dead-server detection goes through _schedule_restart_server_task
@@ -597,6 +615,10 @@ mcp = FastMCP(
     "CodeBadger Server",
     lifespan=app_lifespan,
 )
+# Custom routes must be registered before FastMCP creates its HTTP ASGI app.
+# Each handler resolves services per request, after the lifespan has initialized
+# the project catalog, archive ingestion service, and durable CPG queue.
+register_rest_routes(mcp, services)
 # Tools are registered inside the lifespan (app_lifespan), not here.
 
 
@@ -922,7 +944,9 @@ async def root(request):
         "version": VERSION,
         "endpoints": {
             "health": "/health",
-            "mcp": "/mcp"
+            "mcp": "/mcp",
+            "swagger": "/docs",
+            "openapi": "/openapi.json",
         }
     })
 
