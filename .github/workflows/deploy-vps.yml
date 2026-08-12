@@ -108,6 +108,53 @@ jobs:
           set -euo pipefail
           cd /opt/codebadger
 
+          previous_tag=""
+          rollback_armed=false
+
+          tag_local_latest() {
+            local tag="$1"
+            docker tag "$IMAGE_PREFIX/codebadger-mcp:$tag" codebadger-mcp:latest
+            docker tag "$IMAGE_PREFIX/codebadger-joern-server:$tag" codebadger-joern-server:latest
+          }
+
+          wait_for_health() {
+            for _ in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:4242/health | grep -q '"status"'; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          rollback_on_error() {
+            local failed_status="$1"
+            trap - ERR
+            set +e
+
+            if [[ "$rollback_armed" != true ]]; then
+              echo "Deployment failed before a previous image tag was available; skipping rollback." >&2
+              exit "$failed_status"
+            fi
+
+            echo "Deployment failed; restoring previous immutable tag: $previous_tag" >&2
+            sed -i '/^IMAGE_REGISTRY=/d; /^IMAGE_TAG=/d' .env
+            printf 'IMAGE_REGISTRY=%s/\nIMAGE_TAG=%s\n' "$IMAGE_PREFIX" "$previous_tag" >> .env
+
+            if docker compose config --quiet \
+              && docker compose pull \
+              && tag_local_latest "$previous_tag" \
+              && docker compose up -d --no-build \
+              && wait_for_health; then
+              echo "Automatic rollback restored $previous_tag; deployment remains failed." >&2
+            else
+              echo "Automatic rollback also failed; inspect the VPS immediately." >&2
+            fi
+            exit "$failed_status"
+          }
+
+          trap 'rollback_on_error $?' ERR
+
           # `.env` is host-owned. Create only the non-secret baseline on the
           # first deployment; subsequent deploys change image coordinates only.
           if [[ ! -f .env ]]; then
@@ -121,23 +168,31 @@ jobs:
             chmod 600 .env
           fi
 
-          current_tag="$(sed -n 's/^IMAGE_TAG=//p' .env | tail -1)"
-          if [[ -n "$current_tag" ]]; then
-            printf '%s\n' "$current_tag" > .last-deploy
+          previous_tag="$(sed -n 's/^IMAGE_TAG=//p' .env | tail -1)"
+          if [[ -n "$previous_tag" ]]; then
+            if [[ ! "$previous_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "Existing IMAGE_TAG is not safe to use for rollback: $previous_tag" >&2
+              exit 1
+            fi
+            printf '%s\n' "$previous_tag" > .last-deploy
+            rollback_armed=true
           fi
           sed -i '/^IMAGE_REGISTRY=/d; /^IMAGE_TAG=/d' .env
           printf 'IMAGE_REGISTRY=%s/\nIMAGE_TAG=%s\n' "$IMAGE_PREFIX" "$IMAGE_TAG" >> .env
 
           docker compose config --quiet
           docker compose pull
+
+          # Compose deploys immutable GHCR SHA tags, but some Docker-driven worker
+          # paths retain the local `:latest` fallback. Re-point both local aliases
+          # at the exact SHA just pulled; never pull registry `:latest` here, as a
+          # concurrent release could move it between the two operations.
+          tag_local_latest "$IMAGE_TAG"
+
           docker compose up -d --no-build
 
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:4242/health | grep -q '"status"'; then
-              break
-            fi
-            sleep 2
-          done
+          wait_for_health
           curl -fsS http://127.0.0.1:4242/health
           bash scripts/smoke-test.sh
+          trap - ERR
           REMOTE

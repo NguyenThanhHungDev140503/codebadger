@@ -161,7 +161,11 @@ printf 'IMAGE_REGISTRY=%s/\nIMAGE_TAG=%s\n' "$IMAGE_PREFIX" "$IMAGE_TAG" >> .env
 ~~~
 
 Lần đầu workflow tạo baseline .env. Các setting host khác vẫn thuộc .env VPS.
-Tag cũ được lưu vào .last-deploy trước khi đổi tag mới.
+Tag cũ được lưu vào .last-deploy trước khi đổi tag mới. Nếu health check hoặc
+smoke test thất bại, `trap ERR` của workflow dùng tag này để tự động restore
+`.env`, pull lại image SHA cũ, re-tag hai local alias `:latest`, rồi recreate
+container. Run vẫn kết thúc **failed** để không che giấu deploy lỗi. Lần deploy
+đầu không có tag cũ nên workflow chỉ báo lỗi, không rollback được.
 
 ### Compose resolve image
 
@@ -262,7 +266,9 @@ ssh codebadger "cd /opt/codebadger && docker compose pull && docker compose up -
 ~~~
 
 Rollback chỉ đổi image reference và recreate container; không xóa playground,
-pgdata hay logs.
+pgdata hay logs. Cả automatic rollback và `scripts/rollback.sh` đều re-tag local
+`codebadger-mcp:latest` và `codebadger-joern-server:latest` về đúng SHA đang
+rollback, không pull registry `:latest` có thể đã trỏ sang release mới hơn.
 
 ## 8. Flowchart và call graph
 

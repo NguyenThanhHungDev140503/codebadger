@@ -110,8 +110,9 @@ docker build \
 | `codebadger-mcp` | `latest`, `961fa87` |
 | `codebadger-joern-server` | `latest`, `961fa87` |
 
-> **Tại sao 2 tag?** `latest` là convenience — nếu rollback cần fallback nhanh.
-> `961fa87` (SHA) là canonical — production luôn dùng SHA, không bao giờ `latest`.
+> **Tại sao 2 tag?** `latest` là convenience alias local cho các Docker worker
+> cũ; trên VPS nó luôn được re-tag từ SHA đang deploy hoặc rollback. `961fa87`
+> (SHA) là canonical — production luôn dùng SHA, không bao giờ registry `latest`.
 
 ---
 
@@ -199,7 +200,18 @@ done
 
 ---
 
-### Bước 4: Rollback — `rollback.sh`
+### Bước 4: Automatic rollback trong GitHub Actions
+
+Nếu `docker compose up`, health check, hoặc smoke test thất bại, workflow không
+để VPS chạy release lỗi. `trap ERR` restore `/opt/codebadger/.env` về tag đã lưu
+trong `.last-deploy`, pull lại hai image SHA cũ, re-tag local `:latest`, rồi
+recreate container. GitHub Actions vẫn đánh dấu run **failed**, vì release mới
+không đạt yêu cầu dù VPS đã quay về trạng thái an toàn.
+
+Điều kiện là VPS phải có một deploy thành công trước đó. Lần deploy đầu tiên
+không có `.last-deploy`, nên workflow dừng lỗi thay vì đoán version để rollback.
+
+### Bước 5: Manual rollback — `rollback.sh`
 
 Khi deploy mới gây lỗi, 1 lệnh duy nhất để quay về:
 
@@ -218,8 +230,14 @@ ssh "$VPS" "cd $VPS_APP_DIR && sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=$PREV_TAG/' .en
 
 # Pull image cũ + redeploy
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose pull"
+ssh "$VPS" "docker tag ghcr.io/.../codebadger-mcp:$PREV_TAG codebadger-mcp:latest"
+ssh "$VPS" "docker tag ghcr.io/.../codebadger-joern-server:$PREV_TAG codebadger-joern-server:latest"
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose up -d --no-build"
 ```
+
+Hai lệnh `docker tag` chỉ đổi local alias trên VPS. Chúng trỏ `:latest` về
+đúng image SHA vừa rollback; không pull registry `:latest`, vì tag mutable đó
+có thể đã thuộc về một release mới hơn.
 
 ---
 
@@ -266,10 +284,14 @@ graph TD
         VPS3 --> VPS4[docker compose up -d --no-build]
         VPS4 --> VPS5[curl /health]
         VPS5 --> VPS6[smoke-test.sh]
-        VPS6 --> VPS7[write .last-deploy]
-        SSH2 --> VPS8[read .last-deploy]
-        VPS8 --> VPS9[revert IMAGE_TAG in .env]
-        VPS9 --> VPS10[docker compose pull + up]
+        VPS6 --> VPS7[release healthy]
+        VPS6 -. lỗi .-> AutoRollback[auto restore SHA cũ]
+        AutoRollback --> AutoRetag[re-tag local latest]
+        AutoRetag --> AutoUp[compose up + health]
+        SSH2 --> ManualRead[read .last-deploy]
+        ManualRead --> ManualEnv[revert IMAGE_TAG in .env]
+        ManualEnv --> ManualPull[docker compose pull]
+        ManualPull --> ManualRetag[re-tag local latest + up]
     end
 
     subgraph "GHCR"

@@ -152,6 +152,12 @@ repository. If a package was created before that link existed, open its GitHub
 the workflow can log into GHCR but its repository-scoped `GITHUB_TOKEN` receives
 HTTP 403 while pushing layers to the pre-existing package.
 
+The VPS always deploys Compose services by immutable `IMAGE_TAG` SHA. After it
+pulls that SHA, the workflow also points local `codebadger-mcp:latest` and
+`codebadger-joern-server:latest` tags at the same already-pulled image. This
+keeps legacy Docker worker fallbacks synchronized without risking a race by
+pulling the mutable registry `:latest` tag.
+
 ### Rollback
 
 ```bash
@@ -159,16 +165,23 @@ HTTP 403 while pushing layers to the pre-existing package.
 ./scripts/rollback.sh
 ```
 
-`deploy-prod.sh` saves the previous tag in `/opt/codebadger/.last-deploy` before
-every deploy. `rollback.sh` reads that file, reverts `IMAGE_TAG`, pulls the old
-image, and redeploys.
+The workflow saves the previous tag in `/opt/codebadger/.last-deploy` before
+every deploy. If the new container fails its health check or smoke test, the
+same workflow automatically restores that immutable tag, re-tags the VPS-local
+`codebadger-mcp:latest` and `codebadger-joern-server:latest` aliases to it, and
+keeps the GitHub Actions run failed so the incident remains visible.
+
+`rollback.sh` remains the manual recovery path. It reads `.last-deploy`, reverts
+`IMAGE_TAG`, pulls the old image, re-tags those same local `:latest` aliases,
+and redeploys. Automatic rollback requires an earlier successful deployment;
+the very first deployment has no prior tag to restore.
 
 ### Image tag strategy
 
 - **Canonical tag:** Git short SHA (`961fa87`) — production `.env` always points
 to a specific SHA, never `latest`
-- **Convenience tag:** `latest` — tracks the most recent build, useful as a
-rollback fallback
+- **Local convenience tag:** `latest` — on the VPS it is re-tagged from the
+currently deployed immutable SHA, so legacy Docker fallbacks match Compose
 - **dev workflow:** Leave `IMAGE_REGISTRY` empty + `IMAGE_TAG=latest` → falls
 back to local `docker compose up -d --build`
 

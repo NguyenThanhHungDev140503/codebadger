@@ -22,6 +22,10 @@ if [[ -z "$PREV_TAG" || "$PREV_TAG" == "unknown" ]]; then
   echo "ERROR: No previous deployment tag found (/opt/codebadger/.last-deploy is empty or missing)." >&2
   exit 1
 fi
+if [[ ! "$PREV_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "ERROR: Refusing unsafe deployment tag in /opt/codebadger/.last-deploy." >&2
+  exit 1
+fi
 
 echo "   Rolling back to: $PREV_TAG"
 
@@ -31,6 +35,19 @@ ssh "$VPS" "cd $VPS_APP_DIR && sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=$PREV_TAG/' .en
 # Pull and redeploy
 echo "→ Pulling image $PREV_TAG..."
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose pull"
+
+# Keep local fallback aliases aligned with the immutable image Compose just
+# pulled.  Do not pull mutable registry :latest: it could move to a newer
+# release while this rollback is in progress.
+IMAGE_REGISTRY=$(ssh "$VPS" "cd $VPS_APP_DIR && sed -n 's/^IMAGE_REGISTRY=//p' .env | tail -1 | sed 's#/$##'")
+if [[ ! "$IMAGE_REGISTRY" =~ ^ghcr\.io/[A-Za-z0-9._/-]+$ ]]; then
+  echo "ERROR: Expected a valid GHCR IMAGE_REGISTRY in $VPS_APP_DIR/.env." >&2
+  exit 1
+fi
+
+echo "→ Re-tagging local latest aliases..."
+ssh "$VPS" "docker tag '$IMAGE_REGISTRY/codebadger-mcp:$PREV_TAG' codebadger-mcp:latest && \
+  docker tag '$IMAGE_REGISTRY/codebadger-joern-server:$PREV_TAG' codebadger-joern-server:latest"
 
 echo "→ Redeploying..."
 ssh "$VPS" "cd $VPS_APP_DIR && docker compose up -d --no-build"
