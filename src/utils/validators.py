@@ -73,7 +73,13 @@ def validate_codebase_hash(codebase_hash: str) -> None:
 # rejected so a repo URL can't be turned into an SSRF probe or an
 # undefined-behavior clone.
 ALLOWED_REPO_HOSTS = frozenset(
-    {"github.com", "www.github.com", "gitlab.com", "www.gitlab.com"}
+    {
+        "github.com",
+        "www.github.com",
+        "gitlab.com",
+        "www.gitlab.com",
+        "dev.azure.com",
+    }
 )
 
 # Literal `https://<host>/` prefixes derived from the allowlist. Used as a cheap
@@ -262,10 +268,6 @@ def validate_repo_url(url: str) -> bool:
             "Repository URL must not contain whitespace or control characters"
         )
 
-    try:
-        parsed = urlparse(url)
-    except Exception as e:
-        raise ValidationError(f"Invalid repository URL: {e}")
 
     try:
         port = parsed.port
@@ -335,17 +337,31 @@ def validate_repo_url(url: str) -> bool:
 
 def _validate_repo_url_path(parsed: ParseResult) -> bool:
     """Path check shared by every accepted scheme: at least /owner/repo."""
+    # Path must be at least /owner/repo. Azure DevOps uses a deeper
+    # /{org}/{project}/_git/{repo} layout, which also satisfies this check.
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     if len(parts) < 2:
         raise ValidationError(
             "Invalid repository URL. Expected https://github.com/owner/repo, "
-            "https://gitlab.com/owner/repo, or ssh://<custom-host>/owner/repo"
+            "https://gitlab.com/owner/repo, https://dev.azure.com/{org}/{project}/_git/{repo}, or ssh://<custom-host>/owner/repo"
         )
     return True
 
 
-# Backwards-compatible alias. The validator now also accepts gitlab.com, but the
-# old name is imported across the codebase and in tests.
+def canonicalize_repo_url(url: str) -> str:
+    """Canonicalize a validated repository URL into its standard form."""
+    validate_repo_url(url)
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return f"{scheme}://{host}/{path}"
+
+
+# Backwards-compatible alias. The validator now also accepts gitlab.com and
+# dev.azure.com, but the old name is imported across the codebase and in tests.
 validate_github_url = validate_repo_url
 
 

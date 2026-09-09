@@ -1,14 +1,12 @@
 # Configuration
 
-codebadger reads `config.yaml` and overlays environment variables. **An env var
-is only honored where `config.yaml` uses a `${VAR:default}` placeholder** - so
-the YAML is the source of truth for which knobs are env-overridable. At startup
-the server logs the *effective* config and warns when an env var you set was
-ignored.
-
-```bash
-cp config.example.yaml config.yaml   # start from the template
-```
+codebadger reads the tracked `config.yaml` and overlays environment variables.
+**An env var is only honored where `config.yaml` uses a `${VAR:default}`
+placeholder** - so the YAML is the source of truth for which knobs are
+env-overridable. At startup the server logs the *effective* config and warns
+when an env var you set was ignored. `config.example.yaml` is kept as a clean
+template/reference; normal development and CI builds use the tracked
+`config.yaml` directly.
 
 ## Key settings
 

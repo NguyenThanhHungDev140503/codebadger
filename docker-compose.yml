@@ -1,9 +1,6 @@
 services:
   codebadger-joern-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: codebadger-joern-server:latest
+    image: ${IMAGE_REGISTRY:-}codebadger-joern-server:${IMAGE_TAG:-latest}
     container_name: codebadger-joern-server
     ports:
       # Bind to loopback only for external/debug access. In pool mode the MCP
@@ -18,7 +15,7 @@ services:
     networks:
       - codebadger
     restart: unless-stopped
-    mem_limit: ${JOERN_MEM_LIMIT:-100g}
+    mem_limit: ${JOERN_MEM_LIMIT:-10g}
 
   # The MCP server. Drives the host Docker daemon (socket mount) to build CPGs in
   # codebadger-joern-server and to spawn per-CPG pool worker containers. Uses a
@@ -27,10 +24,7 @@ services:
   # Starts with the full stack by default. For deps-only / run-MCP-on-host dev,
   # add `--scale codebadger-mcp=0`.
   codebadger-mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
-    image: codebadger-mcp:latest
+    image: ${IMAGE_REGISTRY:-}codebadger-mcp:${IMAGE_TAG:-latest}
     container_name: codebadger-mcp
     ports:
       # Host publish for the MCP. MCP_PORT (default 4242, from .env) sets BOTH the
@@ -66,6 +60,12 @@ services:
       # loopback only (e.g. when a reverse proxy / socat already fronts it).
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       JOERN_WORKER_MODE: pool
+      # Pool workers are spawned by the MCP via the host Docker daemon using the
+      # SAME image the joern-server build service runs. Derive from IMAGE_REGISTRY/
+      # IMAGE_TAG so the worker tag always matches what compose pulled (e.g. the
+      # GHCR SHA on prod) — a bare "codebadger-joern-server:latest" default would
+      # not exist on the VPS and sleeping-CPG wake would fail with ImageNotFound.
+      JOERN_WORKER_IMAGE: ${IMAGE_REGISTRY:-}codebadger-joern-server:${IMAGE_TAG:-latest}
       JOERN_PLAYGROUND_HOST_PATH: ${PLAYGROUND_HOST_PATH:-./playground}
       DATABASE_URL: postgresql://codebadger:codebadger@codebadger-postgres:5432/codebadger
       REDIS_URL: redis://codebadger-redis:6379/0
@@ -81,15 +81,15 @@ services:
       # Memory sizing — run scripts/recommend_config.py for your host. JOERN_MEM_LIMIT
       # MUST match the joern-server build cap below so the MCP's over-commit guard
       # leaves the right amount for the query-worker pool. 0 = auto-derive the budget.
-      JOERN_MEM_LIMIT: ${JOERN_MEM_LIMIT:-100g}
-      JOERN_MEMORY_BUDGET_MB: ${JOERN_MEMORY_BUDGET_MB:-0}
+      JOERN_MEM_LIMIT: ${JOERN_MEM_LIMIT:-10g}
+      JOERN_MEMORY_BUDGET_MB: ${JOERN_MEMORY_BUDGET_MB:-5120}
       # Build sizing — fewer concurrent builds with a larger per-build c2cpg heap so
       # large C/C++ projects don't OOM. CPG_BUILD_WORKERS * CPG_BUILD_HEAP_GB must
       # stay <= JOERN_MEM_LIMIT (the build container's cap).
-      CPG_BUILD_WORKERS: ${CPG_BUILD_WORKERS:-4}
+      CPG_BUILD_WORKERS: ${CPG_BUILD_WORKERS:-2}
       CPG_BUILD_HEAP_GB: ${CPG_BUILD_HEAP_GB:-6}
       # Scale knobs: HTTP in-flight cap (503 past this) and the pre-build repo-size cap.
-      MAX_MCP_CONNECTIONS: ${MAX_MCP_CONNECTIONS:-16}
+      MAX_MCP_CONNECTIONS: ${MAX_MCP_CONNECTIONS:-11}
       MAX_REPO_SIZE_MB: ${MAX_REPO_SIZE_MB:-1024}
       # Port the MCP binds (also the host port, matched by the ports: mapping above).
       MCP_PORT: ${MCP_PORT:-4242}
@@ -103,6 +103,9 @@ services:
       # this container — local sources live under /app/playground here.
       CHAT_DEPLOY: ${CHAT_DEPLOY:-false}
       ALLOWED_SOURCE_ROOTS: ${ALLOWED_SOURCE_ROOTS:-}
+      # Optional static token for private repo clones when the caller doesn't
+      # pass github_token per-call. Read from .env (GITHUB_TOKEN).
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # Custom git clone servers (optional) — allowlist your own git host
       # (e.g. a LAN Forgejo) beyond github.com/gitlab.com. ssh:// clones auth
       # via the mounted key (below) or a full GIT_CLONE_SSH_COMMAND.

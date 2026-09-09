@@ -6,6 +6,9 @@
 # other frontend's native astgen keeps working on noble.
 FROM eclipse-temurin:21-jdk-noble
 
+# Link the GHCR package to this repository for GitHub Actions GITHUB_TOKEN access.
+LABEL org.opencontainers.image.source="https://github.com/NguyenThanhHungDev140503/codebadger"
+
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
@@ -15,22 +18,17 @@ RUN apt-get update && apt-get install -y \
 ENV JOERN_VERSION=4.0.594
 ENV JOERN_HOME=/opt/joern
 
-RUN set -eux; \
-    case "$(uname -m)" in \
-      x86_64)        joern_platform=linux-x86_64 ;; \
-      aarch64|arm64) joern_platform=linux-arm64 ;; \
-      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    joern_zip="joern-cli-${joern_platform}.zip"; \
-    base_url="https://github.com/joernio/joern/releases/download/v${JOERN_VERSION}"; \
-    mkdir -p ${JOERN_HOME}; \
-    cd /tmp; \
-    wget -q "${base_url}/${joern_zip}"; \
-    wget -q "${base_url}/${joern_zip}.sha512"; \
-    echo "$(cut -d' ' -f1 "${joern_zip}.sha512")  ${joern_zip}" | sha512sum -c -; \
-    unzip -q -d ${JOERN_HOME} "${joern_zip}"; \
-    test -x ${JOERN_HOME}/joern-cli/joern; \
-    rm -f "${joern_zip}" "${joern_zip}.sha512"
+RUN mkdir -p ${JOERN_HOME} && \
+    cd /tmp && \
+    # Download joern-cli.zip directly (the install script's URL omits the 'v' prefix)
+    echo "Downloading Joern v${JOERN_VERSION} (~500MB, this may take a while)..." && \
+    wget -q --show-progress --retry-connrefused --tries=10 \
+        -O joern-cli.zip \
+        "https://github.com/joernio/joern/releases/download/v${JOERN_VERSION}/joern-cli-linux-x86_64.zip" && \
+    echo "Extracting..." && \
+    unzip -qo joern-cli.zip -d ${JOERN_HOME} && \
+    rm joern-cli.zip && \
+    echo "Joern v${JOERN_VERSION} installed successfully."
 
 ENV PATH="${JOERN_HOME}/joern-cli:${JOERN_HOME}/joern-cli/bin:${PATH}"
 
@@ -40,7 +38,8 @@ ENV PATH="${JOERN_HOME}/joern-cli:${JOERN_HOME}/joern-cli/bin:${PATH}"
 # just rustc + cargo (no docs/clippy/rustfmt) to keep the layer small.
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rm -rf /opt/rustup/downloads /opt/rustup/tmp /opt/rustup/toolchains/*/share/doc /opt/rustup/toolchains/*/share/man
 ENV PATH="/opt/cargo/bin:${PATH}"
 
 RUN mkdir -p /playground

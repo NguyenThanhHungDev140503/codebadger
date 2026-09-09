@@ -11,9 +11,9 @@ joern:
   java_opts: '-Xmx4G -Xms2G -XX:+UseG1GC -XX:+UseStringDeduplication -Dfile.encoding=UTF-8'
 
   # Memory-aware server pool; run scripts/recommend_config.py to size for your host.
-  max_active_servers: 15                          # safety ceiling on concurrent query servers
-  memory_budget_mb: ${JOERN_MEMORY_BUDGET_MB:0}   # real concurrency limit; 0 = auto from host RAM
-  rss_eviction_threshold_mb: 0                    # LRU-evict above this container RSS; 0 = auto
+  max_active_servers: 1                          # safety ceiling on concurrent query servers
+  memory_budget_mb: ${JOERN_MEMORY_BUDGET_MB:5120}   # real concurrency limit; 0 = auto from host RAM
+  rss_eviction_threshold_mb: 9216                    # LRU-evict above this container RSS; 0 = auto
 
   # worker_mode: shared = query servers run as processes in the build container;
   #              pool = each CPG in its own cgroup-capped container (needs worker image + Docker).
@@ -48,7 +48,7 @@ cpg:
   # findings, queue).
   queue_backend: ${CPG_QUEUE_BACKEND:durable}
   # build_workers * build_heap_gb must fit the build container's mem_limit (~7GB/worker incl. JVM).
-  build_workers: ${CPG_BUILD_WORKERS:8}
+  build_workers: ${CPG_BUILD_WORKERS:2}
   max_repo_size_mb: ${MAX_REPO_SIZE_MB:1024}
   # CRITICAL: caps each build frontend's JVM heap. Without it a frontend grabs ~25% of the
   # container (~25GB) and N concurrent builds OOM the host. Raise it, lower build_workers, for v8.
@@ -178,7 +178,6 @@ cpg:
     - ".*\\.md$"
     - ".*\\.txt$"
     - ".*\\.xml$"
-    - ".*\\.json$"
     - ".*\\.yaml$"
     - ".*\\.yml$"
     - ".*\\.toml$"

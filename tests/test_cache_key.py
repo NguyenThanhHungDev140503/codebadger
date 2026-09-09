@@ -10,6 +10,7 @@ from src.tools.core_tools import get_cpg_cache_key
 
 GH = "https://github.com/owner/repo"
 GL = "https://gitlab.com/group/sub/repo"
+AZ = "https://dev.azure.com/org/project/_git/repo"
 
 
 def test_github_branch_changes_key():
@@ -89,3 +90,25 @@ def test_key_is_16_hex_chars():
     k = get_cpg_cache_key("github", GH, "c", branch="x")
     assert len(k) == 16
     int(k, 16)  # raises if not hex
+
+
+def test_azure_branch_changes_key():
+    """Azure DevOps URLs also key on branch (source_type='github' bucket)."""
+    a = get_cpg_cache_key("github", AZ, "csharp", branch="main")
+    b = get_cpg_cache_key("github", AZ, "csharp", branch="dev")
+    assert a != b
+
+
+def test_azure_url_stable_across_trailing_git():
+    """Trailing .git must not change the Azure cache key."""
+    with_git = get_cpg_cache_key("github", AZ + ".git", "csharp")
+    without = get_cpg_cache_key("github", AZ, "csharp")
+    assert with_git == without
+
+
+def test_azure_distinct_from_github_and_gitlab():
+    """The same repo name on different hosts must not collide."""
+    az = get_cpg_cache_key("github", AZ, "csharp")
+    gh = get_cpg_cache_key("github", GH, "csharp")
+    gl = get_cpg_cache_key("github", GL, "csharp")
+    assert len({az, gh, gl}) == 3

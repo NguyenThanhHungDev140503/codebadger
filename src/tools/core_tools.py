@@ -511,6 +511,19 @@ def get_cpg_cache_key(source_type: str, source_path: str, language: str, commit_
             if path.endswith(".git"):
                 path = path[:-4]
             identifier = f"gitlab:{path}:{language}"
+        elif "dev.azure.com/" in source_path:
+            # Azure DevOps URL layout: /{org}/{project}/_git/{repo}.
+            # Key off org/project/repo (drop the literal _git marker) so the
+            # cache key is stable and collision-free.
+            path = source_path.split("dev.azure.com/")[-1].strip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            segments = [s for s in path.split("/") if s]
+            if len(segments) >= 4 and segments[2] == "_git":
+                azure_id = f"{segments[0]}/{segments[1]}/{segments[3]}"
+                identifier = f"azure:{azure_id}:{language}"
+            else:
+                identifier = f"azure:{path}:{language}"
         else:
             identifier = f"github:{source_path}:{language}"
     else:
@@ -1311,6 +1324,76 @@ async def _generate_cpg_async(
         # enforce the configured generation_timeout and keep the event loop responsive.
         generation_timeout = config.cpg.generation_timeout if config else 600
         loop = asyncio.get_running_loop()
+        # Pre-frontend cleanup: remove directories known to break the C# native
+        # AST generator (dotnetastgen-linux) which scans ALL files in the input
+        # tree — including .git, grammars (31 MB tree-sitter parser.c), Logs/
+        # with multi-MB log files, nested bin/obj/ with DLL/PDB blobs, and
+        # nested tmp/artifacts from previous source copies — BEFORE they reach
+        # the frontend binary.  These are never needed for CPG generation, and
+        # omitting them prevents hangs (dotnetastgen chokes on the large C file
+        # and on non-Windows PDBs) and redundant CPU/wall time.  The Joern
+        # --exclude-regex option only filters at the post-AST-parse level, so it
+        # cannot prevent the native binary from trying to process every file first.
+        #
+        # Top-level dirs are removed directly; bin/ and obj/ may be nested inside
+        # any project subdirectory, so we use `find -type d -name` to catch them
+        # at all depths.
+        container_codebase = f"/playground/codebases/{codebase_hash}"
+        _rm_top = (".git", "grammars", "Logs", "logs", "codebases", "cpgs")
+        for jd in _rm_top:
+            try:
+                container.exec_run(["rm", "-rf", f"{container_codebase}/{jd}"], stream=False)
+            except Exception:
+                pass
+        # Remove nested bin/ and obj/ directories at ANY depth (e.g.
+        # WebApi/bin/Debug/, Application/obj/Release/, Tests/obj/...).
+        try:
+            container.exec_run(
+                ["/bin/sh", "-c",
+                 f"find {container_codebase} -type d \\( -name bin -o -name obj \\) -exec rm -rf {{}} + 2>/dev/null"],
+                stream=False,
+            )
+        except Exception:
+            pass
+
+        # Scoping via include_globs: the csharpsrc2cpg frontend has a bug where
+        # --exclude-regex causes DotNetAstGenRunner to fail parsing ALL .cs files,
+        # yielding an empty CPG.  Workaround: physically delete out-of-scope
+        # directories from the container snapshot so csharpsrc2cpg never sees
+        # files it should skip.  Only applies when include_globs is present AND
+        # the frontend is csharp (the only one known to be affected).
+        if include_globs and language == "csharp":
+            scope_dirs = set()
+            for g in include_globs:
+                parts = g.lstrip("./").split("/", 1)
+                if parts:
+                    scope_dirs.add(parts[0])
+            rm_script = (
+                f"cd {container_codebase} && "
+                "for d in */; do "
+                f'  d="${{d%/}}"; '
+                f'  case "$d" in ' + " ".join(f'{sd}) : ;;' for sd in scope_dirs) + " *) rm -rf \"$d\";; esac; "
+                "done"
+            )
+            try:
+                container.exec_run(["/bin/sh", "-c", rm_script], stream=False)
+            except Exception:
+                pass
+            # Remove the scope exclude-regex since we handled it via cleanup.
+            # This avoids the csharpsrc2cpg --exclude-regex bug.
+            try:
+                while "--exclude-regex" in cmd:
+                    idx = cmd.index("--exclude-regex")
+                    # pop both the flag and its value
+                    cmd.pop(idx + 1)
+                    cmd.pop(idx)
+            except (ValueError, IndexError):
+                pass
+            logger.info(
+                f"Scoped via directory cleanup ({len(scope_dirs)} dirs kept); "
+                f"removed --exclude-regex from command to avoid csharpsrc2cpg bug"
+            )
+
         # Worker has claimed the job and is now parsing the source (c2cpg frontend).
         _set_build_phase(services, codebase_hash, "frontend")
         try:
@@ -1714,16 +1797,6 @@ For git repositories, it clones the repo first. For local paths, it copies the s
 The CPG is cached by a hash of the codebase.
 
 Accepted git repositories (source_type='github'):
-  - Public/private repos on github.com or gitlab.com via https:// URLs of the form:
-      https://github.com/<owner>/<repo>   or   https://gitlab.com/<owner>/<repo>
-    (gitlab nested subgroups are allowed; a trailing .git is fine).
-  - Repos on the server's CUSTOM git hosts, when the operator configured
-    GIT_CLONE_EXTRA_HOSTS (e.g. a self-hosted Forgejo). Those hosts accept
-    ssh:// URLs (with custom ports), e.g.:
-      ssh://git@192.168.152.14:3000/<owner>/<repo>.git
-  - Embedded credentials in the URL are always rejected. Use github_token for a
-    private github.com/gitlab.com repo — do NOT embed the token in the URL.
-    (Custom hosts authenticate via the operator's ssh key, not a token.)
 
 Pasting code directly (source_type='snippet'):
   Wrap the code in a <code> tag whose `language` attribute is one of the supported
@@ -1749,13 +1822,10 @@ they want the full project. Pass force=True when the user confirms the full proj
 This guard does NOT apply to GitHub URLs — size is unknown until cloned.
 
 Args:
-    source_type: One of 'local', 'github' (a github.com/gitlab.com repo, or a repo
-                 on a configured GIT_CLONE_EXTRA_HOSTS server), or 'snippet'.
+    source_type: One of 'local', 'github' (a github.com/gitlab.com/dev.azure.com repo), or 'snippet'.
     source_path: REQUIRED for local (absolute path) and github (an https
-                 github.com/gitlab.com URL, or an ssh:// URL on a host the
-                 operator allowlisted via GIT_CLONE_EXTRA_HOSTS). OPTIONAL for
-                 snippet — a short label; when omitted the server derives one from
-                 the filename/language.
+                 github.com/gitlab.com/dev.azure.com URL). OPTIONAL for snippet — a short label;
+                 when omitted the server derives one from the filename/language.
     language: Programming language (java, c, cpp, python, javascript, go, etc.).
               REQUIRED for local/github. Optional for snippets that carry a
               <code language="..."> tag (the tag wins) or whose language is inferable.
@@ -1777,15 +1847,19 @@ Notes:
     - This is an async operation. Use get_cpg_status to check progress.
     - Large codebases may take several minutes to analyze.
     - Supported languages: c, cpp, java, javascript, python, go, kotlin, csharp, php, ruby, swift.
-    - Git repos: only https://github.com/... and https://gitlab.com/... are
-      accepted, plus ssh:// URLs on hosts the operator configured via the
-      GIT_CLONE_EXTRA_HOSTS environment variable (e.g. a LAN Forgejo).
+    - Git repos: only https://github.com/..., https://gitlab.com/..., and
+      https://dev.azure.com/... are accepted.
 
 Examples:
     generate_cpg(
         source_type="github",
         source_path="https://gitlab.com/owner/repo",
         language="java"
+    )
+    generate_cpg(
+        source_type="github",
+        source_path="https://dev.azure.com/org/project/_git/repo",
+        language="csharp"
     )
     generate_cpg(
         source_type="snippet",
@@ -1795,7 +1869,7 @@ Examples:
     )
     async def generate_cpg(
         source_type: Annotated[str, Field(description="One of 'local', 'github', or 'snippet' (code pasted directly into the chat)")],
-        source_path: Annotated[Optional[str], Field(description="REQUIRED for local (absolute path to source directory) and github (an https URL on github.com or gitlab.com ONLY, e.g. https://github.com/user/repo; additionally ssh:// URLs on hosts the operator allowlisted via GIT_CLONE_EXTRA_HOSTS, e.g. ssh://git@192.168.152.14:3000/user/repo.git — embedded credentials are always rejected). OPTIONAL for snippet: a short human label for the pasted code (e.g. a function name); when omitted the server derives one from the filename/language.")] = None,
+        source_path: Annotated[Optional[str], Field(description="REQUIRED for local (absolute path to source directory) and github (an https URL on github.com, gitlab.com, or dev.azure.com ONLY, e.g. https://github.com/user/repo or https://dev.azure.com/org/project/_git/repo — other hosts/schemes/credentials/ports are rejected). OPTIONAL for snippet: a short human label for the pasted code (e.g. a function name); when omitted the server derives one from the filename/language.")] = None,
         language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. REQUIRED for local/github. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is optional.")] = "",
         code: Annotated[Optional[str], Field(description="Required when source_type='snippet'. Wrap the code in a <code language=\"LANG\"> ... </code> tag where LANG is a supported language id, e.g. <code language=\"c\">int main(){...}</code>. Multiple blocks are concatenated but must share one language. Ignored for local/github.")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
@@ -1821,7 +1895,7 @@ Examples:
                 if not (source_path and source_path.strip()):
                     raise ValidationError(
                         f"source_path is required for source_type='{source_type}' "
-                        f"({'absolute path to the source directory' if source_type == 'local' else 'an https github.com/gitlab.com repository URL'})."
+                        f"({'absolute path to the source directory' if source_type == 'local' else 'an https github.com/gitlab.com/dev.azure.com repository URL'})."
                     )
                 if not (language and language.strip()):
                     raise ValidationError(
@@ -1829,13 +1903,13 @@ Examples:
                     )
             # Chat/hosted deployment: never expose arbitrary host filesystem paths
             # through a chat-facing MCP. Disable local sources entirely; callers
-            # must use a github.com/gitlab.com URL or paste the code as a snippet.
+            # must use a github.com/gitlab.com/dev.azure.com URL or paste the code as a snippet.
             if source_type == "local":
                 _cfg = services.get("config")
                 if _cfg and getattr(_cfg.server, "chat_deploy", False):
                     raise ValidationError(
                         "source_type='local' is disabled in this deployment. Provide a "
-                        "github.com or gitlab.com repository URL (or one on a configured "
+                        "github.com, gitlab.com, or dev.azure.com repository URL (or one on a configured "
                         "GIT_CLONE_EXTRA_HOSTS server) with source_type='github', "
                         "or paste the code with source_type='snippet'."
                     )
@@ -1865,6 +1939,10 @@ Examples:
             validate_language(language)
             # Validate every caller-supplied input up front (no-ops when unset).
             validate_git_branch(branch)
+            # Fall back to a statically-configured token (e.g. GITHUB_TOKEN in the
+            # container env) when the caller doesn't pass one per-call.
+            if not github_token:
+                github_token = os.environ.get("GITHUB_TOKEN") or None
             validate_github_token(github_token)
             if source_type == "snippet":
                 validate_code_snippet(code)

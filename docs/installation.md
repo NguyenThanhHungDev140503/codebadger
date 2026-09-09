@@ -101,11 +101,12 @@ docker compose up -d --scale codebadger-mcp=0
 docker compose ps        # codebadger-joern-server / -postgres / -redis up
 ```
 
-### 4. Create your config
+### 4. Check your config
 
-```bash
-cp config.example.yaml config.yaml
-```
+`config.yaml` is tracked and is included in the Docker image by CI. Review or
+edit it before local development if you need to change committed defaults.
+`config.example.yaml` is the clean reference template if you need to restore a
+fresh copy manually.
 
 ### 5. Start the MCP server
 
