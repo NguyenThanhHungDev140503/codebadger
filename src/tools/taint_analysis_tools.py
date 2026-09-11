@@ -4,8 +4,9 @@ Security-focused tools for analyzing data flows and vulnerabilities
 """
 
 import logging
+from fastmcp.exceptions import ToolError
 import re
-from typing import Any, Callable, Dict, Optional, Union, Annotated
+from typing import Any, Callable, Dict, Optional, Union, Annotated, Literal
 from pydantic import Field
 
 from ..exceptions import (
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCES = {
     "c": [
         "getenv", "fgets", "scanf", "read", "recv", "fread", "gets", "getchar",
-        "fscanf", "recvfrom", "recvmsg", "getopt", "getpass", "socket", "accept",
-        "fopen", "getline", "realpath", "getaddrinfo", "gethostbyname",
+        "fscanf", "recvfrom", "recvmsg", "getopt", "getpass", "getline",
+        "realpath", "getaddrinfo", "gethostbyname",
     ],
     "cpp": [
         "getenv", "fgets", "scanf", "read", "recv", "fread", "gets", "getchar",
@@ -80,6 +81,13 @@ DEFAULT_SOURCES = {
         "GetCommandLine", "GetEnvironmentVariable", "ReadFile", "Recv",
     ],
 }
+
+# These APIs create handles or configure a channel; they do not themselves
+# return payload bytes. Keep old copied configs precise while still allowing a
+# caller to opt in through the tool's explicit source_patterns argument.
+NON_INPUT_SOURCE_SETUP_CALLS = frozenset(
+    {"socket", "bind", "listen", "connect", "accept", "fopen"}
+)
 
 # Default taint sinks by language (used when config is empty)
 DEFAULT_SINKS = {
@@ -144,6 +152,20 @@ DEFAULT_SINKS = {
         "WinExec", "ShellExecute", "CreateProcess", "system", "strcpy", "memcpy",
     ],
 }
+
+# Useful for exhaustive audits, but too noisy for the default sink inventory.
+# These remain available through broad=True or explicit sink_patterns.
+BROAD_C_FAMILY_SINKS = frozenset(
+    {
+        "malloc", "calloc", "realloc", "free", "alloca",
+        "memset", "strtok", "strtok_r", "realpath",
+        "access", "faccessat", "stat", "fstat", "lstat", "statat",
+        "utime", "utimes", "futimes", "lutimes", "futimens", "utimensat",
+        "connect", "bind",
+        "scanf", "fscanf", "sscanf", "vscanf", "vfscanf", "vsscanf",
+        "printf", "vprintf", "dprintf", "vdprintf",
+    }
+)
 
 # Default sanitizer/barrier functions by language
 # Flows through these functions are considered "cleaned" and filtered out
@@ -248,6 +270,94 @@ def _build_joern_name_pattern(patterns: list) -> str:
     return "|".join(re.escape(name) for name in unique)
 
 
+def _build_taint_location_query(
+    name_pattern: str, filename: Optional[str], limit: int
+) -> str:
+    """Build a JSON-safe call-location query.
+
+    Joern's json4s serializer cannot encode Scala ``Tuple6`` values on the
+    current runtime. Project into a named map instead so ``toJsonPretty``
+    produces records rather than a MappingException in otherwise-successful
+    query output.
+    """
+    calls = f'cpg.call.name("{escape_scala_string(name_pattern)}")'
+    if filename:
+        file_regex = _build_file_filter_regex(filename)
+        calls += (
+            f'.where(_.file.name("{escape_scala_string(file_regex)}"))'
+        )
+
+    projection = (
+        '.map(c => Map('
+        '"node_id" -> c.id, '
+        '"name" -> c.name, '
+        '"code" -> c.code, '
+        '"filename" -> c.file.name.headOption.getOrElse("unknown"), '
+        '"lineNumber" -> c.lineNumber.getOrElse(-1), '
+        '"method" -> c.method.fullName))'
+    )
+    return f"{calls}{projection}.take({clamp_int(limit, MAX_RESULT_ROWS)})"
+
+
+def _decode_taint_location(item: Any) -> Optional[Dict[str, Any]]:
+    """Decode named-map results while retaining compatibility with old caches."""
+    if not isinstance(item, dict):
+        return None
+    return {
+        "node_id": item.get("node_id", item.get("_1")),
+        "name": item.get("name", item.get("_2")),
+        "code": item.get("code", item.get("_3")),
+        "filename": item.get("filename", item.get("_4")),
+        "lineNumber": item.get("lineNumber", item.get("_5")),
+        "method": item.get("method", item.get("_6")),
+    }
+
+
+def _resolve_source_patterns(cfg, lang: str, explicit_patterns: Optional[list]):
+    """Resolve source defaults and remove non-payload setup APIs."""
+    if explicit_patterns:
+        return explicit_patterns
+
+    configured = (
+        getattr(cfg.cpg, "taint_sources", {})
+        if hasattr(cfg.cpg, "taint_sources")
+        else {}
+    )
+    patterns = configured.get(lang, []) or DEFAULT_SOURCES.get(lang.lower(), [])
+    if lang.lower() not in {"c", "cpp"}:
+        return patterns
+
+    return [
+        pattern
+        for pattern in patterns
+        if pattern.rstrip("(").rsplit(".", 1)[-1]
+        not in NON_INPUT_SOURCE_SETUP_CALLS
+    ]
+
+
+def _resolve_sink_patterns(
+    cfg, lang: str, explicit_patterns: Optional[list], broad: bool
+):
+    """Resolve sink patterns, retaining noisy C-family categories as opt-in."""
+    if explicit_patterns:
+        return explicit_patterns
+
+    configured = (
+        getattr(cfg.cpg, "taint_sinks", {})
+        if hasattr(cfg.cpg, "taint_sinks")
+        else {}
+    )
+    patterns = configured.get(lang, []) or DEFAULT_SINKS.get(lang.lower(), [])
+    if broad or lang.lower() not in {"c", "cpp"}:
+        return patterns
+
+    return [
+        pattern
+        for pattern in patterns
+        if pattern.rstrip("(").rsplit(".", 1)[-1] not in BROAD_C_FAMILY_SINKS
+    ]
+
+
 def _cached_taint_query(
     services: dict,
     tool_name: str,
@@ -316,12 +426,7 @@ def _find_taint_flows_auto(
 
     # Resolve source patterns: user-provided -> config -> built-in defaults
     cfg = services["config"]
-    taint_src_cfg = (
-        getattr(cfg.cpg, "taint_sources", {})
-        if hasattr(cfg.cpg, "taint_sources")
-        else {}
-    )
-    src_patterns = source_patterns or taint_src_cfg.get(lang, []) or DEFAULT_SOURCES.get(lang.lower(), [])
+    src_patterns = _resolve_source_patterns(cfg, lang, source_patterns)
     if not src_patterns:
         return f"No taint source patterns available for language '{lang}'. Supported: {', '.join(DEFAULT_SOURCES.keys())}"
 
@@ -387,6 +492,23 @@ def register_taint_analysis_tools(mcp, services: dict):
     """Register taint analysis MCP tools with the FastMCP server"""
 
     @mcp.tool(
+        title="Find Taint Sources",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "sources": {"type": "array", "items": {"type": "object", "properties": {
+                    "node_id": {}, "name": {"type": ["string", "null"]}, "code": {"type": ["string", "null"]},
+                    "filename": {"type": ["string", "null"]}, "lineNumber": {"type": ["integer", "null"]},
+                    "method": {"type": ["string", "null"]},
+                }, "additionalProperties": False}},
+                "total": {"type": "integer"}, "returned": {"type": "integer"}, "limit": {"type": "integer"},
+                "has_more": {"type": "boolean"}, "truncated": {"type": "boolean"}, "message": {"type": "string"},
+                "error": {"type": ["string", "object"]},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""Locate likely external input points (taint sources).
 
 Search for function calls that could be entry points for untrusted data,
@@ -410,6 +532,9 @@ Returns:
 
 Notes:
     - Built-in default patterns for all supported languages.
+    - Setup/handle calls such as socket, bind, listen, connect, accept, and fopen
+      are excluded by default because they do not themselves produce input data.
+      Pass source_patterns explicitly to include one for a specialized analysis.
     - Sources are the starting points for taint analysis.
     - Use node_id from results with find_taint_flows.
 
@@ -438,30 +563,25 @@ Examples:
             
             # Try config first, then fall back to built-in defaults
             cfg = services["config"]
-            taint_cfg = (
-                getattr(cfg.cpg, "taint_sources", {})
-                if hasattr(cfg.cpg, "taint_sources")
-                else {}
-            )
-
-            # Priority: 1) user-provided, 2) config, 3) built-in defaults
-            patterns = source_patterns or taint_cfg.get(lang, []) or DEFAULT_SOURCES.get(lang.lower(), [])
+            # Priority: explicit caller patterns, then filtered config/defaults.
+            patterns = _resolve_source_patterns(cfg, lang, source_patterns)
             if not patterns:
-                return {"success": True, "sources": [], "total": 0, "message": f"No taint sources configured for language {lang}. Supported: {', '.join(DEFAULT_SOURCES.keys())}"}
+                return {"success": True, "sources": [], "total": 0, "returned": 0, "limit": limit, "has_more": False, "truncated": False, "message": f"No taint sources configured for language {lang}. Supported: {', '.join(DEFAULT_SOURCES.keys())}"}
 
             # Build Joern .name() regex from patterns, extracting short names
             # from qualified patterns (e.g., 'os.system' -> 'system')
             joined = _build_joern_name_pattern(patterns)
 
-            cache_params = {"lang": lang, "patterns": sorted(set(patterns)), "filename": filename, "limit": limit}
+            cache_params = {
+                "lang": lang,
+                "patterns": sorted(set(patterns)),
+                "filename": filename,
+                "limit": limit,
+                "result_shape": "named-map-v1",
+            }
 
             def _execute():
-                # Build query with optional file filter
-                if filename:
-                    file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
-                else:
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
+                query = _build_taint_location_query(joined, filename, limit)
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,
@@ -476,22 +596,18 @@ Examples:
 
                 sources = []
                 for item in result.data:
-                    if isinstance(item, dict):
-                        sources.append({
-                            "node_id": item.get("_1"),
-                            "name": item.get("_2"),
-                            "code": item.get("_3"),
-                            "filename": item.get("_4"),
-                            "lineNumber": item.get("_5"),
-                            "method": item.get("_6"),
-                        })
+                    source = _decode_taint_location(item)
+                    if source is not None:
+                        sources.append(source)
 
                 return {
                     "success": True,
                     "sources": sources,
                     "total": len(sources),
+                    "returned": len(sources),
                     "limit": limit,
                     "has_more": len(sources) >= limit,
+                    "truncated": len(sources) >= limit,
                 }
 
             return _cached_taint_query(services, "find_taint_sources", codebase_hash, cache_params, _execute)
@@ -510,6 +626,23 @@ Examples:
             }
 
     @mcp.tool(
+        title="Find Taint Sinks",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "sinks": {"type": "array", "items": {"type": "object", "properties": {
+                    "node_id": {}, "name": {"type": ["string", "null"]}, "code": {"type": ["string", "null"]},
+                    "filename": {"type": ["string", "null"]}, "lineNumber": {"type": ["integer", "null"]},
+                    "method": {"type": ["string", "null"]},
+                }, "additionalProperties": False}},
+                "total": {"type": "integer"}, "returned": {"type": "integer"}, "limit": {"type": "integer"},
+                "has_more": {"type": "boolean"}, "truncated": {"type": "boolean"}, "mode": {"type": "string"},
+                "message": {"type": "string"}, "error": {"type": ["string", "object"]},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""Locate dangerous sinks where tainted data could cause vulnerabilities.
 
 Search for function calls that could be security-sensitive destinations
@@ -519,6 +652,7 @@ Args:
     codebase_hash: The codebase hash from generate_cpg.
     language: Programming language (c, cpp, java, python, javascript, go, csharp, php, ruby, swift, kotlin, etc). Default: uses CPG language.
     sink_patterns: Optional list of regex patterns for sink functions (e.g., ['system', 'exec']).
+    broad: Include low-signal C/C++ sink categories (default False).
     filename: Optional regex to filter by filename (relative to project root).
     limit: Max results (default 200).
 
@@ -532,7 +666,8 @@ Returns:
     }
 
 Notes:
-    - Built-in default patterns for all supported languages.
+    - C/C++ defaults are focused; set broad=true for exhaustive inventory.
+    - Explicit sink_patterns are never filtered.
     - Sinks are the destinations where tainted data causes harm.
     - Use node_id from results with find_taint_flows.
 
@@ -544,6 +679,7 @@ Examples:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         language: Annotated[Optional[str], Field(description="Programming language (c, cpp, java, python, javascript, etc). If not provided, uses the CPG's language")] = None,
         sink_patterns: Annotated[Optional[list], Field(description="Optional list of regex patterns to match sink function names (e.g., ['system', 'popen', 'sprintf']). If not provided, uses default patterns")] = None,
+        broad: Annotated[bool, Field(description="Include low-signal C/C++ memory, metadata, setup, input, and generic-output sink categories")] = False,
         filename: Annotated[Optional[str], Field(description="Optional filename to filter results (e.g., 'shell.c', 'main.c'). Uses regex matching, so partial names work (e.g., 'shell' matches 'shell.c')")] = None,
         limit: Annotated[int, Field(description="Maximum number of results to return")] = 200,
     ) -> Dict[str, Any]:
@@ -558,32 +694,26 @@ Examples:
 
             lang = language or codebase_info.language or "c"
             
-            # Try config first, then fall back to built-in defaults
             cfg = services["config"]
-            taint_cfg = (
-                getattr(cfg.cpg, "taint_sinks", {})
-                if hasattr(cfg.cpg, "taint_sinks")
-                else {}
-            )
-
-            # Priority: 1) user-provided, 2) config, 3) built-in defaults
-            patterns = sink_patterns or taint_cfg.get(lang, []) or DEFAULT_SINKS.get(lang.lower(), [])
+            patterns = _resolve_sink_patterns(cfg, lang, sink_patterns, broad)
             if not patterns:
-                return {"success": True, "sinks": [], "total": 0, "message": f"No taint sinks configured for language {lang}. Supported: {', '.join(DEFAULT_SINKS.keys())}"}
+                return {"success": True, "sinks": [], "total": 0, "returned": 0, "limit": limit, "has_more": False, "truncated": False, "message": f"No taint sinks configured for language {lang}. Supported: {', '.join(DEFAULT_SINKS.keys())}"}
 
             # Build Joern .name() regex from patterns, extracting short names
             # from qualified patterns (e.g., 'os.system' -> 'system')
             joined = _build_joern_name_pattern(patterns)
 
-            cache_params = {"lang": lang, "patterns": sorted(set(patterns)), "filename": filename, "limit": limit}
+            cache_params = {
+                "lang": lang,
+                "patterns": sorted(set(patterns)),
+                "broad": broad,
+                "filename": filename,
+                "limit": limit,
+                "result_shape": "named-map-v1",
+            }
 
             def _execute():
-                # Build query with optional file filter
-                if filename:
-                    file_regex = _build_file_filter_regex(filename)
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").where(_.file.name("{escape_scala_string(file_regex)}")).map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
-                else:
-                    query = f'cpg.call.name("{escape_scala_string(joined)}").map(c => (c.id, c.name, c.code, c.file.name.headOption.getOrElse("unknown"), c.lineNumber.getOrElse(-1), c.method.fullName)).take({clamp_int(limit, MAX_RESULT_ROWS)})'
+                query = _build_taint_location_query(joined, filename, limit)
 
                 result = query_executor.execute_query(
                     codebase_hash=codebase_hash,
@@ -598,22 +728,23 @@ Examples:
 
                 sinks = []
                 for item in result.data:
-                    if isinstance(item, dict):
-                        sinks.append({
-                            "node_id": item.get("_1"),
-                            "name": item.get("_2"),
-                            "code": item.get("_3"),
-                            "filename": item.get("_4"),
-                            "lineNumber": item.get("_5"),
-                            "method": item.get("_6"),
-                        })
+                    sink = _decode_taint_location(item)
+                    if sink is not None:
+                        sinks.append(sink)
 
                 return {
                     "success": True,
                     "sinks": sinks,
                     "total": len(sinks),
+                    "returned": len(sinks),
                     "limit": limit,
                     "has_more": len(sinks) >= limit,
+                    "truncated": len(sinks) >= limit,
+                    "mode": (
+                        "explicit"
+                        if sink_patterns
+                        else ("broad" if broad else "focused")
+                    ),
                 }
 
             return _cached_taint_query(services, "find_taint_sinks", codebase_hash, cache_params, _execute)
@@ -632,6 +763,9 @@ Examples:
             }
 
     @mcp.tool(
+        title="Find Taint Flows",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Find taint flows from a source to a sink using Joern's native dataflow analysis.
 
 Detects data flow from a specific source node to a specific sink node.
@@ -694,6 +828,7 @@ Examples:
         sink_node_id: Annotated[Optional[int], Field(description="(Manual mode) Node ID from find_taint_sinks output")] = None,
         max_results: Annotated[int, Field(description="Maximum flows to return")] = 20,
         timeout: Annotated[int, Field(description="Query timeout in seconds (default 120 for manual, 300 for auto)")] = 120,
+        detail: Annotated[Literal["compact", "full"], Field(description="Output detail; compact bounds the rendered flow report")] = "compact",
         mode: Annotated[Optional[str], Field(description="Set to 'auto' for batch analysis with all default sources/sinks. Omit for manual mode.")] = None,
         language: Annotated[Optional[str], Field(description="(Auto mode) Programming language for default patterns. Auto-detected if omitted.")] = None,
         source_patterns: Annotated[Optional[list], Field(description="(Auto mode) Override default source function names (e.g., ['getenv', 'read'])")] = None,
@@ -704,7 +839,7 @@ Examples:
         source_pattern: Annotated[Optional[str], Field(description="DEPRECATED: Do not use")] = None,
         sink_pattern: Annotated[Optional[str], Field(description="DEPRECATED: Do not use")] = None,
         depth: Annotated[Optional[int], Field(description="DEPRECATED: Do not use")] = None,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Find data flow paths between source and sink using Joern's native taint analysis."""
         try:
             # Check for legacy arguments that LLMs might hallucinate
@@ -730,7 +865,7 @@ Examples:
 
             # --- AUTO MODE ---
             if mode == "auto":
-                return _find_taint_flows_auto(
+                summary = str(_find_taint_flows_auto(
                     services=services,
                     codebase_hash=codebase_hash,
                     codebase_info=codebase_info,
@@ -742,7 +877,10 @@ Examples:
                     filename=filename,
                     max_results=max_results,
                     timeout=timeout if timeout != 120 else 300,  # default to 300s for auto mode (large codebases need more time)
-                )
+                ))
+                if detail == "compact" and len(summary) > 3000:
+                    summary = summary[:3000].rstrip() + "\n...[truncated; use detail='full']"
+                return {"success": True, "summary": summary}
 
             # --- MANUAL MODE ---
             if mode is not None:
@@ -870,16 +1008,22 @@ Examples:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_taint_flows", codebase_hash, cache_params, _execute)
+            summary = str(_cached_taint_query(services, "find_taint_flows", codebase_hash, cache_params, _execute))
+            if detail == "compact" and len(summary) > 3000:
+                summary = summary[:3000].rstrip() + "\n...[truncated; use detail='full']"
+            return {"success": True, "summary": summary}
 
         except ValidationError as e:
             logger.error(f"Error finding taint flows: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: provide both source and sink endpoints, or use mode='auto'.") from e
         except Exception as e:
             logger.error(f"Unexpected error finding taint flows: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status and narrowing the analysis.") from e
 
     @mcp.tool(
+        title="Get Program Slice",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Build a program slice from a specific call location.
 
 Creates a program slice showing code that affects (backward) or is affected by (forward)
@@ -916,7 +1060,8 @@ Examples:
         max_depth: Annotated[int, Field(description="Maximum depth for recursive dependency tracking")] = 5,
         include_control_flow: Annotated[bool, Field(description="Include control dependencies (if/while conditions)")] = True,
         timeout: Annotated[int, Field(description="Maximum execution time in seconds")] = 60,
-    ) -> str:
+        detail: Annotated[Literal["compact", "full"], Field(description="Output detail; compact bounds the rendered slice report")] = "compact",
+    ) -> Dict[str, Any]:
         """Get program slice showing code affecting (backward) or affected by (forward) a specific call."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -975,17 +1120,23 @@ Examples:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "get_program_slice", codebase_hash, cache_params, _execute)
+            summary = str(_cached_taint_query(services, "get_program_slice", codebase_hash, cache_params, _execute))
+            if detail == "compact" and len(summary) > 3000:
+                summary = summary[:3000].rstrip() + "\n...[truncated; use detail='full']"
+            return {"success": True, "summary": summary}
 
         except ValidationError as e:
             logger.error(f"Error getting program slice: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: provide a valid relative filename:line location.") from e
         except Exception as e:
             logger.error(f"Unexpected error getting program slice: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status and narrowing the slice.") from e
 
 
     @mcp.tool(
+        title="Get Variable Flow",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Analyze data dependencies for a variable at a specific location.
 
 Finds code locations that influence (backward) or are influenced by (forward)
@@ -1016,7 +1167,8 @@ Examples:
         location: str,
         variable: str,
         direction: str = "backward",
-    ) -> str:
+        detail: Literal["compact", "full"] = "compact",
+    ) -> Dict[str, Any]:
         """Analyze variable data dependencies in backward or forward direction."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1069,16 +1221,22 @@ Examples:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "get_variable_flow", codebase_hash, cache_params, _execute)
+            summary = str(_cached_taint_query(services, "get_variable_flow", codebase_hash, cache_params, _execute))
+            if detail == "compact" and len(summary) > 2500:
+                summary = summary[:2500].rstrip() + "\n...[truncated; use detail='full']"
+            return {"success": True, "summary": summary}
 
         except ValidationError as e:
             logger.error(f"Error getting data dependencies: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)}") from e
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)}") from e
 
     @mcp.tool(
+        title="Find Use-After-Free Issues",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Use-After-Free vulnerabilities by finding free(ptr) calls where ptr is used afterward.
 
 Analyzes the codebase for potential UAF issues using three-phase detection:
@@ -1118,7 +1276,7 @@ Notes:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential Use-After-Free vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1131,6 +1289,9 @@ Notes:
             cache_params = {
                 "filename": filename,
                 "limit": limit,
+                # Invalidate successful no-finding results cached before the
+                # delegated/member-alias analysis was added.
+                "analysis_version": 2,
             }
 
             def _execute():
@@ -1149,16 +1310,19 @@ Notes:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_use_after_free", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_use_after_free", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting use-after-free: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting use-after-free: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Double-Free Issues",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Double-Free vulnerabilities by finding multiple free() calls on the same pointer.
 
 Analyzes the codebase for potential double-free issues using:
@@ -1191,7 +1355,7 @@ Returns:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential Double-Free vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1222,16 +1386,19 @@ Returns:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_double_free", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_double_free", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting double-free: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting double-free: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Null Pointer Dereferences",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Null Pointer Dereference vulnerabilities (CWE-476) by finding unchecked return values from allocation functions.
 
 Analyzes the codebase for cases where:
@@ -1275,7 +1442,7 @@ Notes:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential Null Pointer Dereference vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1306,16 +1473,19 @@ Notes:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_null_pointer_deref", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_null_pointer_deref", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting null pointer dereference: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting null pointer dereference: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Integer Overflows",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Integer Overflow/Underflow vulnerabilities (CWE-190) before allocation or array indexing.
 
 Analyzes the codebase for cases where arithmetic operations (multiplication, left-shift,
@@ -1361,7 +1531,7 @@ Notes:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 300,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential Integer Overflow/Underflow vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1392,16 +1562,19 @@ Notes:
 
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_integer_overflow", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_integer_overflow", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting integer overflow: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting integer overflow: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Format String Vulnerabilities",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Format String vulnerabilities (CWE-134) where a non-literal value is used as a printf-family format argument.
 
 Analyzes the codebase for calls to format-string functions (printf, fprintf, sprintf,
@@ -1436,7 +1609,7 @@ Examples:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 120,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential format string vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1461,16 +1634,19 @@ Examples:
                 )
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_format_string_vulns", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_format_string_vulns", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting format string vulnerabilities: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting format string vulnerabilities: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Heap Overflows",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Heap Overflow vulnerabilities (CWE-122) where a write to a heap buffer exceeds its allocated size.
 
 Analyzes the codebase for pairs of (allocation, write) where the write may exceed
@@ -1506,7 +1682,7 @@ Examples:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 240,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential heap overflow vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1531,16 +1707,19 @@ Examples:
                 )
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_heap_overflow", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_heap_overflow", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting heap overflow: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting heap overflow: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Stack Overflows",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect Stack Buffer Overflow vulnerabilities (CWE-121) where a write to a fixed-size stack array may exceed its declared dimension.
 
 Analyzes the codebase for local fixed-size array declarations (e.g. char buf[64]) combined
@@ -1575,7 +1754,7 @@ Examples:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 240,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect potential stack buffer overflow vulnerabilities in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1600,16 +1779,19 @@ Examples:
                 )
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_stack_overflow", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_stack_overflow", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting stack overflow: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting stack overflow: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find TOCTOU Issues",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect TOCTOU (Time-of-Check-Time-of-Use) race condition vulnerabilities (CWE-367) where a file is checked with access()/stat()/lstat() and then opened or operated on in a separate step.
 
 Analyzes the codebase for the classic TOCTOU pattern:
@@ -1642,7 +1824,7 @@ Examples:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 240,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect TOCTOU race condition vulnerabilities (CWE-367) in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1667,16 +1849,19 @@ Examples:
                 )
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_toctou", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_toctou", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting TOCTOU: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting TOCTOU: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Find Uninitialized Reads",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Detect uninitialized variable reads (CWE-457) — variables used before assignment.
 
 Analyzes the codebase for local variables that are read before they have been
@@ -1712,7 +1897,7 @@ Examples:
         filename: Annotated[Optional[str], Field(description="Optional filename regex to filter results")] = None,
         limit: Annotated[int, Field(description="Maximum results to return")] = 100,
         timeout: Annotated[int, Field(description="Query timeout in seconds")] = 240,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Detect uninitialized variable reads (CWE-457) in the codebase."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -1721,7 +1906,11 @@ Examples:
 
             codebase_info = require_cpg(services, codebase_hash)
 
-            cache_params = {"filename": filename, "limit": limit}
+            cache_params = {
+                "filename": filename,
+                "limit": limit,
+                "analysis_version": 2,
+            }
 
             def _execute():
                 query = QueryLoader.load(
@@ -1737,11 +1926,11 @@ Examples:
                 )
                 return unwrap_result(result)
 
-            return _cached_taint_query(services, "find_uninitialized_reads", codebase_hash, cache_params, _execute)
+            return {"success": True, "summary": str(_cached_taint_query(services, "find_uninitialized_reads", codebase_hash, cache_params, _execute))}
 
         except ValidationError as e:
             logger.error(f"Error detecting uninitialized reads: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: verify the codebase hash, filename filter, and result limit.") from e
         except Exception as e:
             logger.error(f"Unexpected error detecting uninitialized reads: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e

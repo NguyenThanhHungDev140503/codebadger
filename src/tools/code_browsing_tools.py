@@ -5,8 +5,10 @@ Tools for exploring and navigating codebase structure
 
 import logging
 import os
-from typing import Any, Dict, Optional, Annotated
+import re
+from typing import Any, Dict, Optional, Annotated, Literal
 from pydantic import Field
+from fastmcp.exceptions import ToolError
 
 from ..exceptions import (
             ValidationError,
@@ -20,6 +22,32 @@ from ._common import require_cpg, unwrap_result
 
 logger = logging.getLogger(__name__)
 
+_DUPLICATE_TYPE_SUFFIX = re.compile(r"<duplicate>[0-9]+$")
+
+
+def _deduplicate_type_definitions(types):
+    """Normalize Joern duplicate suffixes and prefer canonical definitions."""
+    unique = {}
+    for item in types:
+        if not isinstance(item, dict):
+            continue
+
+        full_name = str(item.get("fullName") or "")
+        canonical_full_name = _DUPLICATE_TYPE_SUFFIX.sub("", full_name)
+        normalized = {**item, "fullName": canonical_full_name}
+        key = canonical_full_name or str(item.get("name") or "")
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = (normalized, full_name != canonical_full_name)
+            continue
+
+        _, existing_is_duplicate = existing
+        candidate_is_duplicate = full_name != canonical_full_name
+        if existing_is_duplicate and not candidate_is_duplicate:
+            unique[key] = (normalized, False)
+
+    return [definition for definition, _ in unique.values()]
+
 
 def _get_playground_path() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "playground"))
@@ -30,6 +58,36 @@ def register_code_browsing_tools(mcp, services: dict):
 
 
     @mcp.tool(
+        title="List Methods",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "methods": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"}, "node_id": {"type": "string"},
+                            "fullName": {"type": "string"}, "signature": {"type": "string"},
+                            "filename": {"type": "string"}, "lineNumber": {"type": "integer"},
+                            "lineNumberEnd": {"type": "integer"},
+                            "cyclomaticComplexity": {"type": "number"},
+                            "numberOfLines": {"type": "integer"}, "isExternal": {"type": "boolean"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "total": {"type": "integer"}, "available": {"type": "integer"},
+                "returned": {"type": "integer"}, "result_cap": {"type": "integer"},
+                "truncated": {"type": "boolean"}, "page": {"type": "integer"},
+                "page_size": {"type": "integer"}, "total_pages": {"type": "integer"},
+                "error": {"type": "string"},
+            },
+            "required": ["success"],
+            "additionalProperties": False,
+        },
         description="""List methods/functions in the codebase.
 
 Discover all methods and functions defined in the analyzed code.
@@ -47,9 +105,14 @@ Returns:
     {
         "success": true,
         "methods": [{"name": "main", "filename": "main.c", ...}],
-        "total": 100,
+        "total": 1250,
+        "available": 1000,
+        "returned": 100,
+        "result_cap": 1000,
+        "truncated": true,
         "page": 1,
-        "total_pages": 5
+        "page_size": 100,
+        "total_pages": 10
     }
 
 Notes:
@@ -66,7 +129,7 @@ Examples:
         file_pattern: Annotated[Optional[str], Field(description="Optional regex to filter by file path")] = None,
         callee_pattern: Annotated[Optional[str], Field(description="Optional regex to filter for methods that call a specific function (e.g., 'memcpy|free|malloc')")] = None,
         include_external: Annotated[bool, Field(description="Include external/library methods")] = False,
-        limit: Annotated[int, Field(description="Maximum number of results to fetch for caching")] = 1000,
+        limit: Annotated[int, Field(description="Maximum number of matching methods made available for pagination (capped at 10000); total still reports the exact match count")] = 1000,
         page: Annotated[int, Field(description="Page number")] = 1,
         page_size: Annotated[int, Field(description="Number of results per page")] = 100,
     ) -> Dict[str, Any]:
@@ -98,6 +161,33 @@ Examples:
 
 
     @mcp.tool(
+        title="List Calls",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "calls": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "caller": {"type": "string"}, "callee": {"type": "string"},
+                            "code": {"type": "string"}, "filename": {"type": "string"},
+                            "lineNumber": {"type": "integer"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "total": {"type": "integer"}, "available": {"type": "integer"},
+                "returned": {"type": "integer"}, "result_cap": {"type": "integer"},
+                "truncated": {"type": "boolean"}, "page": {"type": "integer"},
+                "page_size": {"type": "integer"}, "total_pages": {"type": "integer"},
+                "error": {"type": ["string", "object"]},
+            },
+            "required": ["success"],
+            "additionalProperties": False,
+        },
         description="""List function/method calls in the codebase.
 
 Discover call relationships between functions.
@@ -113,9 +203,16 @@ Returns:
     {
         "success": true,
         "calls": [
-            {"caller": "main", "callee": "printf", "fileName": "main.c", "lineNumber": 10}
+            {"caller": "main", "callee": "printf", "filename": "main.c", "lineNumber": 10}
         ],
-        "total": 1
+        "total": 25000,
+        "available": 1000,
+        "returned": 100,
+        "result_cap": 1000,
+        "truncated": true,
+        "page": 1,
+        "page_size": 100,
+        "total_pages": 10
     }
 
 Notes:
@@ -129,7 +226,7 @@ Examples:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         caller_pattern: Annotated[Optional[str], Field(description="Optional regex to filter caller method names")] = None,
         callee_pattern: Annotated[Optional[str], Field(description="Optional regex to filter callee method names")] = None,
-        limit: Annotated[int, Field(description="Maximum number of results to fetch for caching")] = 1000,
+        limit: Annotated[int, Field(description="Maximum number of matching calls made available for pagination (capped at 10000); total still reports the exact match count")] = 1000,
         page: Annotated[int, Field(description="Page number")] = 1,
         page_size: Annotated[int, Field(description="Number of results per page")] = 100,
     ) -> Dict[str, Any]:
@@ -159,6 +256,9 @@ Examples:
 
 
     @mcp.tool(
+        title="Get Call Graph",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Get the call graph for a specific method.
 
 Understand what functions a method calls (outgoing) or what functions
@@ -202,7 +302,8 @@ Examples:
         method_name: Annotated[str, Field(description="Name of the method to analyze (can be regex)")],
         depth: Annotated[int, Field(description="How many levels deep to traverse (max recommended: 10)")] = 5,
         direction: Annotated[str, Field(description="Either 'outgoing' (callees) or 'incoming' (callers)")] = "outgoing",
-    ) -> str:
+        detail: Annotated[Literal["compact", "full"], Field(description="Output detail; compact returns a bounded summary")] = "compact",
+    ) -> Dict[str, Any]:
         """Build the call graph showing callers or callees for a method."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -232,17 +333,38 @@ Examples:
                 limit=500,
             )
 
-            return unwrap_result(result)
+            if not result.success:
+                raise ToolError(f"QUERY_ERROR: {result.error or 'Call graph query failed'} Hint: verify the CPG is ready and narrow the method/depth filters.")
+            summary = unwrap_result(result)
+            if detail == "compact" and len(summary) > 2000:
+                summary = summary[:2000].rstrip() + "\n...[truncated; use detail='full']"
+            return {"success": True, "summary": summary}
 
         except ValidationError as e:
             logger.error(f"Error getting call graph: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: check direction and keep depth between 1 and 15.") from e
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
 
     @mcp.tool(
+        title="List Parameters",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "methods": {"type": "array", "items": {"type": "object", "properties": {
+                    "method": {"type": "string"},
+                    "parameters": {"type": "array", "items": {"type": "object", "properties": {
+                        "name": {"type": "string"}, "type": {"type": "string"}, "index": {"type": "integer"},
+                    }, "additionalProperties": False}},
+                }, "required": ["method", "parameters"], "additionalProperties": False}},
+                "total": {"type": "integer"}, "error": {"type": ["string", "object"]},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""List parameters of a specific method.
 
 Get detailed information about method parameters including their names,
@@ -298,6 +420,20 @@ Examples:
 
 
     @mcp.tool(
+        title="Run CPGQL Query",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"}, "data": {},
+                "row_count": {"type": ["integer", "null"]},
+                "execution_time": {"type": ["number", "null"]},
+                "truncated": {"type": "boolean"}, "truncation_note": {"type": "string"},
+                "error": {"type": "string"}, "error_code": {"type": "string"},
+                "suggestion": {}, "help": {}, "validation": {},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""Execute a raw CPGQL query against the codebase.
 
 Run arbitrary Code Property Graph Query Language (CPGQL) queries
@@ -424,6 +560,9 @@ Examples:
             }
 
     @mcp.tool(
+        title="Find Bounds Checks",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Find bounds checks near buffer access.
 
 Verify if buffer accesses have corresponding bounds checks by analyzing
@@ -447,7 +586,7 @@ Examples:
     def find_bounds_checks(
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         buffer_access_location: Annotated[str, Field(description="Location of buffer access in format 'filename:line' (e.g., 'parser.c:3393')")],
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Check if buffer accesses have proper bounds validation."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -483,18 +622,28 @@ Examples:
             if result.success and result.data:
                 # Text queries return a single-element list wrapping the rendered text.
                 output = result.data[0] if isinstance(result.data, list) else str(result.data)
-                return output.strip()
+                return {"success": True, "summary": output.strip()}
             else:
-                return f"Error: {result.error if not result.success else 'No data returned'}"
+                raise ToolError(f"QUERY_ERROR: {result.error if not result.success else 'No data returned'} Hint: verify the CPG is ready and use a relative filename:line location.")
 
         except ValidationError as e:
             logger.error(f"Error finding bounds checks: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: provide buffer_access_location as filename:line.") from e
         except Exception as e:
             logger.error(f"Unexpected error: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
     @mcp.tool(
+        title="Get CPGQL Syntax Help",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"}, "syntax_helpers": {},
+                "error_guide": {}, "quick_reference": {}, "error": {"type": "string"},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""Get comprehensive CPGQL syntax help and examples.
 
 Provides syntax documentation, common patterns, node types, and error solutions.
@@ -613,6 +762,9 @@ Examples:
     # Semantic analysis tools
 
     @mcp.tool(
+        title="Get Control Flow Graph",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": False}}, "required": ["success"], "additionalProperties": False},
         description="""Get control flow graph (CFG) for a method.
 
 Understand the control flow of a method with a human-readable graph.
@@ -645,7 +797,7 @@ Examples:
         codebase_hash: Annotated[str, Field(description="The codebase hash from generate_cpg")],
         method_name: Annotated[str, Field(description="Name of the method (can be regex pattern)")],
         max_nodes: Annotated[int, Field(description="Maximum CFG nodes to return (for large methods)")] = 100,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Get nodes and edges representing control flow in a method."""
         try:
             validate_codebase_hash(codebase_hash)
@@ -667,17 +819,34 @@ Examples:
                 limit=max_nodes,
             )
 
-            return unwrap_result(result)
+            if not result.success:
+                raise ToolError(f"QUERY_ERROR: {result.error or 'CFG query failed'} Hint: verify the CPG is ready and lower max_nodes for large methods.")
+            return {"success": True, "summary": unwrap_result(result)}
 
         except ValidationError as e:
             logger.error(f"Error getting CFG: {e}")
-            return f"Validation Error: {str(e)}"
+            raise ToolError(f"VALIDATION_ERROR: {str(e)} Hint: provide a valid codebase hash and method name.") from e
         except Exception as e:
             logger.error(f"Unexpected error getting CFG: {e}", exc_info=True)
-            return f"Internal Error: {str(e)}"
+            raise ToolError(f"INTERNAL_ERROR: {str(e)} Hint: retry after checking CPG/backend status.") from e
 
 
     @mcp.tool(
+        title="Get Type Definition",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "types": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": ["string", "null"]}, "fullName": {"type": ["string", "null"]},
+                    "filename": {"type": ["string", "null"]}, "lineNumber": {"type": ["integer", "null"]},
+                    "members": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                }, "additionalProperties": False}},
+                "total": {"type": "integer"}, "error": {"type": ["string", "object"]},
+            },
+            "required": ["success"], "additionalProperties": False,
+        },
         description="""Get type/struct definition with members.
 
 Inspect struct or class memory layouts.
@@ -701,6 +870,7 @@ Returns:
 Notes:
     - Essential for understanding buffer sizes and memory layouts.
     - Does not read header files; uses CPG type info.
+    - Joern's internal `<duplicate>N` variants are collapsed into the canonical type.
 
 Examples:
     get_type_definition(codebase_hash="abc", type_name=".*request_t.*")""",
@@ -749,6 +919,8 @@ Examples:
                             "members": item.get("_5", []),
                         })
 
+            types = _deduplicate_type_definitions(types)
+
             return {
                 "success": True,
                 "types": types,
@@ -767,5 +939,3 @@ Examples:
                 "success": False,
                 "error": str(e),
             }
-
-

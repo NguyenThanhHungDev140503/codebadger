@@ -5,6 +5,7 @@ Provides core CPG management functionality
 """
 
 import asyncio
+import inspect
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -957,6 +958,22 @@ def _schedule_warmup(services: dict, codebase_hash: str) -> None:
     fut.add_done_callback(_done)
 
 
+def _restart_failure_is_stale(codebase_tracker, codebase_hash: str) -> bool:
+    """Return true when this restart no longer owns the codebase state.
+
+    A watchdog restart can overlap a fresh generation (or another restart).  In
+    that case its late failure must not overwrite the newer READY state.
+    """
+    try:
+        info = codebase_tracker.get_codebase(codebase_hash)
+        metadata = getattr(info, "metadata", None)
+        return isinstance(metadata, dict) and metadata.get("status") not in {
+            SessionStatus.LOADING, "loading"
+        }
+    except Exception:
+        return False
+
+
 async def _restart_server_async(
     codebase_hash: str,
     container_cpg_path: str,
@@ -984,6 +1001,9 @@ async def _restart_server_async(
             # terminated). Mark FAILED so we don't leave a "ready" codebase whose
             # server is dead — that caused the restart-fail churn (server not
             # running for ready codebase -> retry -> fail -> repeat).
+            if _restart_failure_is_stale(codebase_tracker, codebase_hash):
+                logger.warning(f"Async: ignoring stale reload failure for {codebase_hash}")
+                return
             logger.error(f"Async: CPG reload failed for {codebase_hash}; marking failed")
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
@@ -1011,6 +1031,9 @@ async def _restart_server_async(
         logger.error(f"Async: failed to restart server for {codebase_hash}: {e}", exc_info=True)
         try:
             codebase_tracker = services["codebase_tracker"]
+            if _restart_failure_is_stale(codebase_tracker, codebase_hash):
+                logger.warning(f"Async: ignoring stale restart error for {codebase_hash}")
+                return
             codebase_tracker.update_codebase(
                 codebase_hash=codebase_hash,
                 metadata={"status": SessionStatus.FAILED, "error": f"Server restart failed: {e}"}
@@ -1704,6 +1727,23 @@ class DurableCPGQueue:
             job_id = job["id"]
             payload = dict(job["payload"])
             payload["services"] = self.services
+            payload.setdefault("codebase_hash", job["codebase_hash"])
+            # Jobs created by older clients/tests may contain only a partial
+            # payload.  Do not invoke the strict generation coroutine with
+            # missing positional arguments (which otherwise leaves noisy
+            # retry/failure logs and can consume a worker during integration
+            # runs).  Mark malformed durable jobs failed and continue polling.
+            required = ("codebase_dir", "cpg_path", "language", "container_cpg_path")
+            signature = inspect.signature(_generate_cpg_async)
+            validates_payload = not any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            if validates_payload and any(payload.get(key) in (None, "") for key in required):
+                error = f"Malformed generate_cpg payload; missing one of: {', '.join(required)}"
+                logger.error("CPG generation job %s rejected: %s", job_id, error)
+                await loop.run_in_executor(None, self.store.fail_job, job_id, error)
+                continue
             try:
                 await _generate_cpg_async(**payload)
                 await loop.run_in_executor(None, self.store.complete_job, job_id)
@@ -1743,6 +1783,13 @@ def register_core_tools(mcp, services: dict):
     """Register core MCP tools with the FastMCP server"""
 
     @mcp.tool(
+        title="Generate Code Property Graph",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         description="""Generate a Code Property Graph (CPG) for a codebase.
 
 This tool initiates the analysis process by generating a CPG for the specified codebase.
@@ -1750,15 +1797,6 @@ For git repositories, it clones the repo first. For local paths, it copies the s
 The CPG is cached by a hash of the codebase.
 
 Accepted git repositories (source_type='github'):
-  - ONLY public/private repos on github.com, gitlab.com, or dev.azure.com.
-  - The URL MUST be an https:// URL of the form:
-      https://github.com/<owner>/<repo>
-      https://gitlab.com/<owner>/<repo>            (nested subgroups allowed)
-      https://dev.azure.com/<org>/<project>/_git/<repo>
-    (a trailing .git is fine).
-  - Other hosts, schemes (git://, ssh://, http://), embedded credentials, or
-    custom ports are rejected. Use github_token for a private repo, do NOT embed
-    the token in the URL.
 
 Pasting code directly (source_type='snippet'):
   Wrap the code in a <code> tag whose `language` attribute is one of the supported
@@ -1835,7 +1873,7 @@ Examples:
         language: Annotated[str, Field(description="Programming language - one of: java, c, cpp, javascript, python, go, kotlin, csharp, ghidra, jimple, php, ruby, swift. REQUIRED for local/github. For a snippet whose code carries a <code language=\"...\"> tag, the tag's language wins and this is optional.")] = "",
         code: Annotated[Optional[str], Field(description="Required when source_type='snippet'. Wrap the code in a <code language=\"LANG\"> ... </code> tag where LANG is a supported language id, e.g. <code language=\"c\">int main(){...}</code>. Multiple blocks are concatenated but must share one language. Ignored for local/github.")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename for a snippet (e.g. 'parser.c'); defaults to snippet.<ext> from the language. Ignored for local/github.")] = None,
-        github_token: Annotated[Optional[str], Field(description="GitHub Personal Access Token for private repositories (optional)")] = None,
+        github_token: Annotated[Optional[str], Field(description="Access token for private github.com/gitlab.com repositories (optional; sent as the clone URL username). Custom GIT_CLONE_EXTRA_HOSTS servers authenticate via the operator's ssh key instead — a token is not used there. Never embed the token in the URL.")] = None,
         branch: Annotated[Optional[str], Field(description="Specific git branch to checkout (optional, defaults to default branch)")] = None,
         force: Annotated[bool, Field(description="Skip the large-project size warning. Set to True only after the user has explicitly confirmed they want to analyze the full project.")] = False,
         include_paths: Annotated[Optional[list], Field(description="C/C++ only: extra header include directories for c2cpg (--include). Relative paths resolve against the source root (e.g. 'include', '_build/include'); absolute paths pass through. Use when a project's generated headers (e.g. a configure/cmake-produced xmlversion.h or config.h) gate code behind feature macros — the source root, any include/ dir, and dirs containing config.h/*version*.h are auto-detected, so this is only needed for non-standard layouts.")] = None,
@@ -1871,8 +1909,9 @@ Examples:
                 if _cfg and getattr(_cfg.server, "chat_deploy", False):
                     raise ValidationError(
                         "source_type='local' is disabled in this deployment. Provide a "
-                        "github.com, gitlab.com, or dev.azure.com repository URL with "
-                        "source_type='github', or paste the code with source_type='snippet'."
+                        "github.com, gitlab.com, or dev.azure.com repository URL (or one on a configured "
+                        "GIT_CLONE_EXTRA_HOSTS server) with source_type='github', "
+                        "or paste the code with source_type='snippet'."
                     )
             # For snippets the code may be wrapped in <code language="..."> tags;
             # extract the language + body from them so the snippet is
@@ -2310,6 +2349,27 @@ Examples:
             }
 
     @mcp.tool(
+        title="Get CPG Status",
+        output_schema={
+            "type": "object",
+            "properties": {
+                "codebase_hash": {"type": "string"},
+                "status": {"type": "string"},
+                "phase": {"type": "string"},
+                "joern_port": {"type": ["integer", "null"]},
+                "elapsed_seconds": {"type": "number"},
+                "deadline_seconds": {"type": "number"},
+                "error_code": {"type": "string"},
+                "error": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         description="""Get the current status of a CPG and its Joern server.
 
 USE THIS TO WAIT FOR generate_cpg: generate_cpg starts the build in the background
@@ -2330,8 +2390,8 @@ Returns:
         "joern_port": port number or null,
         "language": "programming language",
         "phase": "queued" | "frontend" | "loading" | "ready" | ...,  # finer-grained than status
-        "elapsed_seconds": seconds since the build started,
-        "deadline_seconds": seconds of budget left before timeout reconciliation (0 = overdue),
+        "elapsed_seconds": live build time (or recorded duration for terminal states),
+        "deadline_seconds": seconds of budget left while building (0 outside active builds),
         "queue_position": 1-based position behind other queued builds (only while queued),
         "user_method_count": verified user-defined methods in the loaded CPG (coverage check)
     }
@@ -2493,15 +2553,36 @@ Examples:
             if meta.get("user_method_count") is not None:
                 response["user_method_count"] = meta["user_method_count"]
 
-            started = _parse_iso(meta.get("generation_started_at")) or codebase_info.created_at
-            if started is not None:
+            active_status = status in (
+                "generating", SessionStatus.GENERATING,
+                "loading", SessionStatus.LOADING,
+            )
+            started_key = (
+                "generation_started_at"
+                if status in ("generating", SessionStatus.GENERATING)
+                else "load_started_at"
+            )
+            started = _parse_iso(meta.get(started_key))
+            if active_status and started is not None:
                 if started.tzinfo is None:
                     started = started.replace(tzinfo=timezone.utc)
-                response["elapsed_seconds"] = round((_now_utc() - started).total_seconds(), 1)
+                response["elapsed_seconds"] = max(
+                    0.0, round((_now_utc() - started).total_seconds(), 1)
+                )
+            else:
+                recorded_elapsed = meta.get("generation_elapsed_seconds", 0.0)
+                try:
+                    response["elapsed_seconds"] = max(0.0, round(float(recorded_elapsed), 1))
+                except (TypeError, ValueError):
+                    response["elapsed_seconds"] = 0.0
 
             deadline = _parse_iso(meta.get("generation_deadline"))
-            if deadline is not None:
-                response["deadline_seconds"] = max(0.0, round((deadline - _now_utc()).total_seconds(), 1))
+            if active_status and deadline is not None:
+                response["deadline_seconds"] = max(
+                    0.0, round((deadline - _now_utc()).total_seconds(), 1)
+                )
+            else:
+                response["deadline_seconds"] = 0.0
 
             # Queue position only makes sense while still queued; surface it so a
             # caller knows it's behind N others rather than actively parsing.
@@ -2536,6 +2617,29 @@ Examples:
             }
 
     @mcp.tool(
+        title="Get Backend Status",
+        output_schema={
+            "type": "object",
+            "properties": {
+                "build_workers": {"type": ["integer", "null"]},
+                "queue_depth": {"type": "integer"},
+                "in_flight": {"type": "integer"},
+                "active_servers": {"type": "integer"},
+                "cpg_count": {"type": "integer"},
+                "cpgs": {"type": "array"},
+                "cpg_page": {"type": "integer"},
+                "cpg_page_size": {"type": "integer"},
+                "cpg_total_pages": {"type": "integer"},
+                "cpg_truncated": {"type": "boolean"},
+            },
+            "additionalProperties": True,
+        },
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         description="""Inspect backend capacity and load so you can self-pace CPG generation.
 
 Read-only. Use this BEFORE fanning out many generate_cpg calls (or when builds
@@ -2552,8 +2656,12 @@ Returns:
         "active_servers": live Joern query servers,
         "max_active_servers": server admission cap,
         "memory": {budget_mb, reserved_mb, free_mb, utilization_pct, ...},
-        "cpgs": [{codebase_label, status, phase, language, last_accessed}, ...],
-        "cpg_count": total tracked CPGs
+    "cpgs": [{codebase_label, status, phase, language, last_accessed}, ...],
+        "cpg_count": total tracked CPGs,
+        "cpg_page": 1,
+        "cpg_page_size": 50,
+        "cpg_total_pages": ...,
+        "cpg_truncated": true when more CPGs are available
     }
 
 Notes:
@@ -2564,7 +2672,10 @@ Notes:
     - Filesystem paths are not exposed; CPGs are identified by `codebase_label`.
 """,
     )
-    def get_backend_status() -> Dict[str, Any]:
+    def get_backend_status(
+        page: Annotated[int, Field(description="1-based page of tracked CPGs to return")] = 1,
+        page_size: Annotated[int, Field(description="Number of CPG summaries per page, capped at 200")] = 50,
+    ) -> Dict[str, Any]:
         """Report build-queue, Joern-server and memory load for agent self-pacing."""
         try:
             config = services.get("config")
@@ -2611,8 +2722,19 @@ Notes:
                             "language": cb.language,
                             "last_accessed": cb.last_accessed.isoformat() if cb.last_accessed else None,
                         })
-                    response["cpgs"] = cpgs
                     response["cpg_count"] = len(cpgs)
+                    safe_page = max(1, page)
+                    safe_page_size = max(1, min(page_size, 200))
+                    start = (safe_page - 1) * safe_page_size
+                    response["cpgs"] = cpgs[start:start + safe_page_size]
+                    response["cpg_page"] = safe_page
+                    response["cpg_page_size"] = safe_page_size
+                    response["cpg_returned"] = len(response["cpgs"])
+                    response["cpg_total_pages"] = (
+                        (len(cpgs) + safe_page_size - 1) // safe_page_size
+                        if cpgs else 1
+                    )
+                    response["cpg_truncated"] = start + len(response["cpgs"]) < len(cpgs)
                 except Exception as e:
                     logger.debug(f"get_backend_status: codebase listing failed: {e}")
 
@@ -2629,6 +2751,13 @@ Notes:
             return {"success": False, "error": str(e)}
 
     @mcp.tool(
+        title="Remove or Evict CPG",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         description="""Free resources held by a codebase.
 
 delete_files=False (default):

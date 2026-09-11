@@ -8,6 +8,7 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from src.models import CodebaseInfo, Config, QueryResult
 from src.services.codebase_tracker import CodebaseTracker
@@ -466,6 +467,58 @@ class TestMCPTools:
                 assert result_dict["source_path"] == "<redacted:local-source>"
                 assert result_dict["container_codebase_path"] == "<redacted:container-path>"
                 assert result_dict["container_cpg_path"] == "<redacted:container-path>"
+                assert result_dict["elapsed_seconds"] == 0.0
+                assert result_dict["deadline_seconds"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_uses_recorded_terminal_duration(self, mock_services):
+        from src.tools.core_tools import register_core_tools
+
+        mock_services["codebase_tracker"].get_codebase.return_value.metadata = {
+            "status": "failed",
+            "generation_elapsed_seconds": 12.5,
+            "error_code": "BUILD_ERROR",
+            "error": "frontend failed",
+        }
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "get_cpg_status", {"codebase_hash": "553642871dd4251d"}
+            )
+            import json
+            response = json.loads(result.content[0].text)
+
+        assert response["status"] == "failed"
+        assert response["elapsed_seconds"] == 12.5
+        assert response["deadline_seconds"] == 0.0
+        assert response["error_code"] == "BUILD_ERROR"
+
+    @pytest.mark.asyncio
+    async def test_get_cpg_status_loading_does_not_reuse_generation_timestamp(self, mock_services):
+        from datetime import datetime, timedelta, timezone
+        from src.tools.core_tools import register_core_tools
+
+        mock_services["codebase_tracker"].get_codebase.return_value.metadata = {
+            "status": "loading",
+            "generation_started_at": (
+                datetime.now(timezone.utc) - timedelta(days=2)
+            ).isoformat(),
+        }
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "get_cpg_status", {"codebase_hash": "553642871dd4251d"}
+            )
+            import json
+            response = json.loads(result.content[0].text)
+
+        assert response["status"] == "failed"
+        assert response["elapsed_seconds"] == 0.0
+        assert response["deadline_seconds"] == 0.0
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_reports_progress_fields(self, mock_services):
@@ -874,6 +927,137 @@ class TestMCPTools:
             assert r["cpg_count"] == 1
             assert r["cpgs"][0]["codebase_label"] == "repo@55364287"
             assert r["cpgs"][0]["status"] == "ready"
+            assert r["cpg_page"] == 1
+            assert r["cpg_page_size"] == 50
+            assert r["cpg_total_pages"] == 1
+            assert r["cpg_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_core_status_tools_expose_titles_and_safe_annotations(self, mock_services):
+        from src.tools.core_tools import register_core_tools
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+        from src.tools.taint_analysis_tools import register_taint_analysis_tools
+        from src.tools.custom_tools import register_custom_tools
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+        register_code_browsing_tools(mcp, mock_services)
+        register_taint_analysis_tools(mcp, mock_services)
+        register_custom_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+
+            assert tools, "No MCP tools registered"
+            for tool in tools:
+                assert tool.title, f"Missing title for {tool.name}"
+                assert tool.description, f"Missing description for {tool.name}"
+                assert tool.annotations is not None, f"Missing annotations for {tool.name}"
+                assert tool.outputSchema is not None, f"Missing output schema for {tool.name}"
+
+        by_name = {tool.name: tool for tool in tools}
+        assert by_name["get_cpg_status"].title == "Get CPG Status"
+        assert by_name["get_backend_status"].title == "Get Backend Status"
+        assert by_name["get_cpg_status"].annotations.readOnlyHint is True
+        assert by_name["get_backend_status"].annotations.destructiveHint is False
+        assert by_name["remove_cpg"].annotations.destructiveHint is True
+        assert by_name["generate_cpg"].title == "Generate Code Property Graph"
+        assert by_name["generate_cpg"].annotations.readOnlyHint is False
+        assert by_name["get_cpg_status"].outputSchema["type"] == "object"
+        assert by_name["get_cpg_status"].outputSchema["additionalProperties"] is True
+        assert by_name["get_backend_status"].outputSchema["type"] == "object"
+
+        for name in ("list_methods", "list_calls", "get_call_graph", "get_type_definition", "list_parameters", "run_cpgql_query", "get_cfg", "find_bounds_checks", "get_cpgql_syntax_help"):
+            assert by_name[name].title
+            assert by_name[name].annotations.readOnlyHint is True
+        for name in (
+            "find_taint_sources", "find_taint_sinks", "find_taint_flows",
+            "get_program_slice", "get_variable_flow", "find_use_after_free",
+            "find_double_free", "find_null_pointer_deref", "find_integer_overflow",
+            "find_format_string_vulns", "find_heap_overflow", "find_stack_overflow",
+            "find_toctou", "find_uninitialized_reads",
+        ):
+            assert by_name[name].title
+            assert by_name[name].annotations.readOnlyHint is True
+        methods_schema = by_name["list_methods"].outputSchema
+        assert methods_schema["required"] == ["success"]
+        assert methods_schema["properties"]["truncated"]["type"] == "boolean"
+        for name in ("list_methods", "list_calls", "find_taint_sources", "find_taint_sinks"):
+            props = by_name[name].outputSchema["properties"]
+            assert "total" in props and "returned" in props and "truncated" in props
+        calls_schema = by_name["list_calls"].outputSchema
+        assert calls_schema["properties"]["calls"]["items"]["properties"]["callee"]["type"] == "string"
+        assert by_name["get_type_definition"].outputSchema["properties"]["types"]["type"] == "array"
+        assert by_name["list_parameters"].outputSchema["properties"]["methods"]["type"] == "array"
+        assert by_name["run_cpgql_query"].outputSchema["properties"]["data"] == {}
+        assert by_name["find_taint_sources"].outputSchema["properties"]["sources"]["type"] == "array"
+        assert by_name["find_taint_sinks"].outputSchema["properties"]["sinks"]["type"] == "array"
+        assert by_name["find_taint_flows"].title == "Find Taint Flows"
+        assert by_name["get_program_slice"].title == "Get Program Slice"
+        assert by_name["get_variable_flow"].title == "Get Variable Flow"
+        assert by_name["find_use_after_free"].title == "Find Use-After-Free Issues"
+        assert by_name["find_double_free"].title == "Find Double-Free Issues"
+        assert by_name["find_null_pointer_deref"].title == "Find Null Pointer Dereferences"
+        assert by_name["find_integer_overflow"].title == "Find Integer Overflows"
+        assert by_name["find_format_string_vulns"].title == "Find Format String Vulnerabilities"
+        assert by_name["find_heap_overflow"].title == "Find Heap Overflows"
+        assert by_name["find_stack_overflow"].title == "Find Stack Overflows"
+        assert by_name["find_toctou"].title == "Find TOCTOU Issues"
+        assert by_name["find_uninitialized_reads"].title == "Find Uninitialized Reads"
+        assert by_name["find_command_injection_sinks"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_call_graph"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_call_graph"].inputSchema["properties"]["detail"]["default"] == "compact"
+        assert by_name["find_taint_flows"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_taint_flows"].inputSchema["properties"]["detail"]["default"] == "compact"
+        assert by_name["get_cfg"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_bounds_checks"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_program_slice"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_program_slice"].inputSchema["properties"]["detail"]["default"] == "compact"
+        assert by_name["get_variable_flow"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_variable_flow"].inputSchema["properties"]["detail"]["default"] == "compact"
+        assert by_name["find_use_after_free"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_double_free"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_null_pointer_deref"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_integer_overflow"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_format_string_vulns"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_heap_overflow"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_stack_overflow"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_toctou"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["find_uninitialized_reads"].outputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_cpgql_syntax_help"].outputSchema["required"] == ["success"]
+
+    @pytest.mark.asyncio
+    async def test_get_backend_status_pages_large_cpg_catalog(self, mock_services):
+        from datetime import datetime, timezone
+        from src.tools.core_tools import register_core_tools
+
+        now = datetime.now(timezone.utc)
+        mock_services["codebase_tracker"].list_codebases_full.return_value = [
+            CodebaseInfo(
+                codebase_hash=f"{index:016x}", source_type="local",
+                source_path="/tmp/repo", language="c", cpg_path="/tmp/test.cpg",
+                last_accessed=now, metadata={"status": "ready"},
+            )
+            for index in range(55)
+        ]
+
+        mcp = FastMCP("TestServer")
+        register_core_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "get_backend_status", {"page": 2, "page_size": 20}
+            )
+            import json
+            response = json.loads(result.content[0].text)
+
+        assert response["cpg_count"] == 55
+        assert len(response["cpgs"]) == 20
+        assert response["cpg_page"] == 2
+        assert response["cpg_page_size"] == 20
+        assert response["cpg_returned"] == 20
+        assert response["cpg_total_pages"] == 3
+        assert response["cpg_truncated"] is True
 
     @pytest.mark.asyncio
     async def test_get_cpg_status_not_found(self, mock_services):
@@ -1130,6 +1314,77 @@ Edges:
             assert result_dict["types"][0]["name"] == "Buffer"
             assert len(result_dict["types"][0]["members"]) == 2
 
+    @pytest.mark.asyncio
+    async def test_get_type_definition_collapses_joern_duplicate_variants(
+        self, mock_services
+    ):
+        """Canonical definitions win and duplicate-only definitions keep members."""
+        import json
+
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        mock_services["query_executor"].execute_query.return_value = QueryResult(
+            success=True,
+            data=[
+                {
+                    "_1": "glob_t",
+                    "_2": "glob_t<duplicate>0",
+                    "_3": "runtest.c",
+                    "_4": 228,
+                    "_5": [{"name": "gl_pathc", "type": "size_t"}],
+                },
+                {
+                    "_1": "glob_t",
+                    "_2": "glob_t",
+                    "_3": "runtest.c",
+                    "_4": 134,
+                    "_5": [
+                        {"name": "gl_pathc", "type": "size_t"},
+                        {"name": "gl_pathv", "type": "char**"},
+                    ],
+                },
+                {
+                    "_1": "testDesc",
+                    "_2": "testDesc<duplicate>1",
+                    "_3": "runtest.c",
+                    "_4": 116,
+                    "_5": [{"name": "desc", "type": "char*"}],
+                },
+            ],
+            row_count=3,
+        )
+
+        mcp = FastMCP("TestServer")
+        register_code_browsing_tools(mcp, mock_services)
+
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "get_type_definition",
+                {"codebase_hash": "553642871dd4251d", "type_name": ".*"},
+            )
+            result_dict = json.loads(result.content[0].text)
+
+        assert result_dict["total"] == 2
+        assert result_dict["types"] == [
+            {
+                "name": "glob_t",
+                "fullName": "glob_t",
+                "filename": "runtest.c",
+                "lineNumber": 134,
+                "members": [
+                    {"name": "gl_pathc", "type": "size_t"},
+                    {"name": "gl_pathv", "type": "char**"},
+                ],
+            },
+            {
+                "name": "testDesc",
+                "fullName": "testDesc",
+                "filename": "runtest.c",
+                "lineNumber": 116,
+                "members": [{"name": "desc", "type": "char*"}],
+            },
+        ]
+
 
 
 
@@ -1249,3 +1504,23 @@ class TestCpgBuildFailureLabeling:
         assert d["status"] == "failed"
         assert d["error_code"] == "OOM"
         assert "memory" in d["error"]
+
+    @pytest.mark.asyncio
+    async def test_contract_representative_success_and_native_error(self, mock_services):
+        from src.tools.core_tools import register_core_tools
+        from src.tools.code_browsing_tools import register_code_browsing_tools
+
+        mock_services["codebase_tracker"].get_codebase.return_value = CodebaseInfo(
+            codebase_hash="0123456789abcdef", source_type="local", source_path="/x",
+            language="c", cpg_path="/x/cpg.bin", metadata={"status": "ready"},
+        )
+        mcp = FastMCP("contract")
+        register_core_tools(mcp, mock_services)
+        register_code_browsing_tools(mcp, mock_services)
+        async with Client(mcp) as client:
+            success = await client.call_tool("get_cpg_status", {"codebase_hash": "0123456789abcdef"})
+            assert success.content and success.content[0].type == "text"
+            with pytest.raises(ToolError, match="VALIDATION_ERROR"):
+                await client.call_tool("get_call_graph", {
+                    "codebase_hash": "0123456789abcdef", "method_name": "main", "depth": 99,
+                })

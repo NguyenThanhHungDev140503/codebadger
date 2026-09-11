@@ -12,6 +12,7 @@ server start.  Restart the server after editing this file.
 
 import logging
 import re
+from fastmcp.exceptions import ToolError
 from typing import Any, Dict, List, Optional, Annotated
 from pydantic import Field
 
@@ -26,6 +27,9 @@ def register_custom_tools(mcp, services: dict) -> None:
     """Register all custom analysis tools with the FastMCP server."""
 
     @mcp.tool(
+        title="Find Command Injection Sinks",
+        annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        output_schema={"type": "object", "properties": {"success": {"type": "boolean"}, "summary": {"type": "string"}, "error": {"type": "string"}}, "required": ["success"], "additionalProperties": False},
         description="""Find potential OS command injection sinks (CWE-78).
 
 Identifies call sites where shell-execution functions receive a non-literal
@@ -61,7 +65,7 @@ Examples:
         language: Annotated[Optional[str], Field(description="Language for sink selection (auto-detected if omitted)")] = None,
         filename: Annotated[Optional[str], Field(description="Optional filename to restrict results")] = None,
         max_results: Annotated[int, Field(description="Maximum sink call sites to return", ge=1, le=200)] = 50,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Identify shell-execution call sites that receive dynamic arguments."""
         try:
             info = require_cpg(services, codebase_hash)
@@ -94,18 +98,20 @@ Examples:
                 max_results=max_results,
             )
 
-            return run_query(
+            return {"success": True, "summary": run_query(
                 services, codebase_hash, info.cpg_path, query,
                 timeout=90,
                 tool_name="find_command_injection_sinks",
                 cache_params=cache_params,
-            )
+            )}
 
-        except (ValidationError, RuntimeError) as e:
-            return f"Error: {e}"
+        except ValidationError as e:
+            raise ToolError(f"VALIDATION_ERROR: {e} Hint: verify the codebase hash and language/filter arguments.") from e
+        except RuntimeError as e:
+            raise ToolError(f"QUERY_ERROR: {e} Hint: verify the CPG is ready and narrow the result limit.") from e
         except Exception as e:
             logger.error(f"find_command_injection_sinks: {e}", exc_info=True)
-            return f"Internal Error: {e}"
+            raise ToolError(f"INTERNAL_ERROR: {e} Hint: retry after checking CPG/backend status.") from e
 
     # Add your own tools below.
     # Template:
