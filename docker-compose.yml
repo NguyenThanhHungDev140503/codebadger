@@ -67,7 +67,11 @@ services:
       # not exist on the VPS and sleeping-CPG wake would fail with ImageNotFound.
       JOERN_WORKER_IMAGE: ${IMAGE_REGISTRY:-}codebadger-joern-server:${IMAGE_TAG:-latest}
       JOERN_PLAYGROUND_HOST_PATH: ${PLAYGROUND_HOST_PATH:-./playground}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-codebadger}:${POSTGRES_PASSWORD:-codebadger}@codebadger-postgres:5432/${POSTGRES_DB:-codebadger}}
+      POSTGRES_HOST: ${POSTGRES_HOST:-codebadger-postgres}
+      POSTGRES_PORT: ${POSTGRES_CONTAINER_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-codebadger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codebadger}
+      POSTGRES_DB: ${POSTGRES_DB:-codebadger}
       REDIS_URL: redis://codebadger-redis:6379/0
       # Pool workers are attached to this network and reached by container name —
       # no host port is published, so 127.0.0.1 binding is not needed anywhere.
