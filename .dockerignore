@@ -42,7 +42,6 @@ docs/
 *.md
 
 # Config and local files
-config.example.yaml
 pytest.ini
 pyproject.toml
 .flake8
