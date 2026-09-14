@@ -4,8 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 import uuid
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from src.models import Config, CPGConfig, QueryResult, CodebaseInfo
+from src.config import load_config
+from src.tools.taint_analysis_tools import DEFAULT_SOURCES
 from src.tools.mcp_tools import register_tools
 from src.tools.queries import QueryLoader
 
@@ -47,13 +50,13 @@ def fake_services():
         return QueryResult(
             success=True,
             data=[
-                { 
-                    "_1": 123,
-                    "_2": "getenv",
-                    "_3": 'char *s = getenv("FOO")',
-                    "_4": "core.c",
-                    "_5": 10,
-                    "_6": "main",
+                {
+                    "node_id": 123,
+                    "name": "getenv",
+                    "code": 'char *s = getenv("FOO")',
+                    "filename": "core.c",
+                    "lineNumber": 10,
+                    "method": "main",
                 }
             ],
             row_count=1,
@@ -91,6 +94,62 @@ async def test_find_taint_sources_success(fake_services):
         assert "sources" in res
         assert isinstance(res["sources"], list)
         assert res["total"] == 1
+        assert res["sources"][0]["name"] == "getenv"
+
+    query = fake_services["query_executor"].last_query
+    assert 'Map("node_id" -> c.id' in query
+    assert "(c.id, c.name, c.code" not in query
+
+
+def test_default_c_sources_exclude_setup_and_handle_calls():
+    setup_calls = {"socket", "bind", "listen", "connect", "accept", "fopen"}
+
+    assert setup_calls.isdisjoint(DEFAULT_SOURCES["c"])
+
+    config = load_config("config.example.yaml")
+    assert setup_calls.isdisjoint(config.cpg.taint_sources["c"])
+    assert setup_calls.isdisjoint(config.cpg.taint_sources["cpp"])
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sources_filters_setup_calls_from_existing_config(
+    fake_services,
+):
+    fake_services["config"].cpg.taint_sources = {
+        "c": ["getenv", "socket", "bind", "listen"]
+    }
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "find_taint_sources",
+            {"codebase_hash": fake_services["codebase_hash"], "language": "c"},
+        )
+
+    query = fake_services["query_executor"].last_query
+    assert "getenv" in query
+    assert "socket" not in query
+    assert "bind" not in query
+    assert "listen" not in query
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sources_allows_explicit_setup_call_opt_in(fake_services):
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "find_taint_sources",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "source_patterns": ["socket"],
+            },
+        )
+
+    assert "socket" in fake_services["query_executor"].last_query
 
 
 @pytest.mark.asyncio
@@ -135,6 +194,23 @@ def test_query_loader_escapes_scala_string_values():
     assert 'val methodName = "main\\"; cpg.call.l // {{depth}}"' in query
 
 
+def test_auto_taint_query_reports_bounded_flow_counts():
+    query = QueryLoader.load(
+        "taint_flows_auto",
+        source_pattern="getenv",
+        sink_pattern="system",
+        sanitizer_pattern="",
+        file_filter="",
+        max_results=20,
+    )
+
+    assert ".take(maxResults + 1)" in query
+    assert "Matched flow candidates:" in query
+    assert "Confirmed flows after sanitizers:" in query
+    assert "Counts: matched=" in query
+    assert "truncated=" in query
+
+
 @pytest.mark.asyncio
 async def test_find_taint_sources_escapes_filename_for_query(fake_services):
     mcp = FastMCP("TestServer")
@@ -171,6 +247,77 @@ async def test_find_taint_sinks_success(fake_services):
         assert "sinks" in res
         assert isinstance(res["sinks"], list)
         assert res["total"] == 1
+        assert res["sinks"][0]["name"] == "getenv"
+
+    query = fake_services["query_executor"].last_query
+    assert 'Map("node_id" -> c.id' in query
+    assert "(c.id, c.name, c.code" not in query
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sinks_defaults_to_focused_c_categories(fake_services):
+    fake_services["config"].cpg.taint_sinks = {
+        "c": ["system", "sprintf", "malloc", "free", "stat", "bind", "printf"]
+    }
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "find_taint_sinks",
+            {"codebase_hash": fake_services["codebase_hash"], "language": "c"},
+        )
+        import json
+
+        response = json.loads(result.content[0].text)
+
+    query = fake_services["query_executor"].last_query
+    assert 'name("system|sprintf")' in query
+    assert response["mode"] == "focused"
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sinks_broad_mode_restores_filtered_categories(fake_services):
+    patterns = ["system", "malloc", "free", "stat", "bind", "printf"]
+    fake_services["config"].cpg.taint_sinks = {"c": patterns}
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "find_taint_sinks",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "broad": True,
+            },
+        )
+        import json
+
+        response = json.loads(result.content[0].text)
+
+    query = fake_services["query_executor"].last_query
+    for pattern in patterns:
+        assert pattern in query
+    assert response["mode"] == "broad"
+
+
+@pytest.mark.asyncio
+async def test_find_taint_sinks_explicit_patterns_bypass_focused_filter(fake_services):
+    mcp = FastMCP("TestServer")
+    register_tools(mcp, fake_services)
+
+    async with Client(mcp) as client:
+        await client.call_tool(
+            "find_taint_sinks",
+            {
+                "codebase_hash": fake_services["codebase_hash"],
+                "language": "c",
+                "sink_patterns": ["free"],
+            },
+        )
+
+    assert "free" in fake_services["query_executor"].last_query
 
 
 @pytest.mark.asyncio
@@ -351,17 +498,12 @@ async def test_find_taint_flows_validation_error(fake_services):
 
     async with Client(mcp) as client:
         # Test with only sink (missing source)
-        res_text = await client.call_tool(
-            "find_taint_flows",
-            {
-                "codebase_hash": services["codebase_hash"],
-                "sink_location": "core.c:42",
-                "timeout": 10,
-            }
-        )
-        result = res_text.content[0].text
-
-        # Should return validation error about missing source
-        assert "Validation Error" in result
-        assert "source" in result.lower()
-
+        with pytest.raises(ToolError, match="source"):
+            await client.call_tool(
+                "find_taint_flows",
+                {
+                    "codebase_hash": services["codebase_hash"],
+                    "sink_location": "core.c:42",
+                    "timeout": 10,
+                },
+            )

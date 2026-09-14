@@ -187,6 +187,8 @@ void npd_reassigned(char *o){
 UNINIT_FIXTURE = r"""
 #include <stdio.h>
 #include <string.h>
+typedef struct NetworkContext { int fd; } NetworkContext;
+int consume(int a, int b);
 void ur_true(void){
     int x;
     printf("%d", x);
@@ -206,6 +208,12 @@ void ur_assigned(void){
     x = 5;
     printf("%d", x);
 }
+void ur_synthetic_names(void){
+    int enabled = false;
+    int fd = consume(AF_INET, SOCK_STREAM);
+    int bytes = sizeof(NetworkContext);
+    printf("%d %d %d", enabled, fd, bytes);
+}
 """
 
 
@@ -217,6 +225,8 @@ def test_uninitialized_read_matrix(server):
     assert not fire("ur_memset"), "memset(&x, ...) initializes x"
     assert not fire("ur_addrof"), "scanf(\"%d\", &x) initializes x"
     assert not fire("ur_assigned"), "x = 5 initializes x"
+    for synthetic in ("false", "AF_INET", "SOCK_STREAM", "NetworkContext"):
+        assert f"Variable:    {synthetic} " not in out
 
 
 UAF_MEMBER_FIXTURE = r"""
@@ -235,6 +245,58 @@ def test_use_after_free_member_access(server):
     # identifier) — argument(1) extraction now analyzes it.
     out = _run_detector(server, UAF_MEMBER_FIXTURE, "use_after_free")
     assert "in uaf_member()" in out
+
+
+UAF_INTERPROC_ALIAS_FIXTURE = r"""
+#include <stdlib.h>
+struct S { char *buffer; char *shadow; };
+void sink(char *p);
+
+static void release_slot(void **slot) {
+    if (slot && *slot) free(*slot);
+}
+
+void *uaf_detach(struct S *obj) {
+    void *alias = obj->buffer;
+    release_slot((void **)&obj->buffer);
+    return alias;
+}
+
+void establish_shadow(struct S *obj) {
+    obj->shadow = obj->buffer;
+}
+
+void release_buffer(struct S *obj) {
+    free(obj->buffer);
+    obj->buffer = NULL;
+}
+
+void uaf_shadow(struct S *obj) {
+    char *local = obj->shadow;
+    sink(local);
+}
+
+void safe_remap(struct S *obj) {
+    free(obj->buffer);
+    obj->buffer = malloc(8);
+    obj->shadow = obj->buffer;
+    sink(obj->shadow);
+}
+
+void exercise_alias(struct S *obj) {
+    establish_shadow(obj);
+    release_buffer(obj);
+    uaf_shadow(obj);
+}
+"""
+
+
+def test_use_after_free_interprocedural_aliases(server):
+    out = _run_detector(server, UAF_INTERPROC_ALIAS_FIXTURE, "use_after_free")
+    assert "in uaf_detach()" in out, "returning an alias freed by a helper must fire"
+    assert "in release_buffer()" in out, "a stale member alias must fire"
+    assert "uaf_shadow" in out, "the stale member use should be shown"
+    assert "in safe_remap()" not in out, "refreshing both members repairs the alias"
 
 
 DF_MEMBER_FIXTURE = r"""

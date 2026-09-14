@@ -42,6 +42,7 @@ Everything a developer or security researcher needs lives in **[docs/](docs/)**:
 |-----|--------------|
 | [Installation](docs/installation.md) | Prerequisites and a 5-minute local setup. |
 | [Usage](docs/usage.md) | Connecting MCP clients, the tool catalog, and a researcher workflow. |
+| [LLM workflow guide](docs/llm-workflows.md) | Recommended bounded tool sequence for agents. |
 | [Available Tools](docs/available-tools.md) | Every MCP tool by category, with a description of what each does. |
 | [Configuration](docs/configuration.md) | `config.yaml` / env reference, telemetry. |
 | [Deployment](docs/deployment.md) | Dev setup, production deploy via GHCR immutable images, rollback, memory sizing. |
