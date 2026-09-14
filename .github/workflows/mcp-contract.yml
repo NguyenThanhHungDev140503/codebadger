@@ -38,7 +38,7 @@ jobs:
           exit 1
       - name: Run live integration and detector tests
         env:
-          CODEBADGER_TEST_PG_DSN: "postgresql://${PGUSER:-codebadger}:${PGPASS:-codebadger}@127.0.0.1:55432/${PGDATABASE:-codebadger}"
+          CODEBADGER_TEST_PG_DSN: "${TEST_PG_URL:-}"
         run: >-
           docker run --rm --network host
           -v "$PWD:/workspace"
