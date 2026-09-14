@@ -4,4 +4,4 @@ __version__ = "0.6.2-beta"
 __author__ = "Ahmed Lekssays"
 __email__ = "ahmed@lekssays.com"
 
-__all__ = ["JoernMCPServer"]
+__all__ = ["__version__", "__author__", "__email__"]

@@ -43,7 +43,7 @@ jobs:
           -v /var/run/docker.sock:/var/run/docker.sock
           -w /workspace
           -e CODEBADGER_LIVE_JOERN=1
-          -e CODEBADGER_TEST_PG_DSN=postgresql://codebadger:codebadger@127.0.0.1:55432/codebadger
+          -e CODEBADGER_TEST_PG_DSN=postgresql://${PGUSER:-codebadger}:${PGPASSWORD:-codebadger}@127.0.0.1:55432/${PGDATABASE:-codebadger}
           -e CODEBADGER_TEST_REDIS_URL=redis://127.0.0.1:56379/0
           codebadger-mcp:latest
           pytest -q tests/integration tests/test_detectors_live.py tests/test_coordination.py

@@ -268,6 +268,10 @@ def validate_repo_url(url: str) -> bool:
             "Repository URL must not contain whitespace or control characters"
         )
 
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        raise ValidationError(f"Invalid repository URL: {e}")
 
     try:
         port = parsed.port

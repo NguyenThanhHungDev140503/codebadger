@@ -60,7 +60,8 @@ fi
 
 # Clean the Postgres tables. Prefers a host psql; falls back to docker exec.
 # Override via DATABASE_URL, or PG_CONTAINER for docker exec.
-DATABASE_URL="${DATABASE_URL:-postgresql://codebadger:codebadger@localhost:55432/codebadger}"
+PG_PASSWORD="${POSTGRES_PASSWORD:-codebadger}"
+DATABASE_URL="${DATABASE_URL:-postgresql://${PG_USER:-codebadger}:${PG_PASSWORD}@localhost:55432/${PG_DB:-codebadger}}"
 PG_CONTAINER="${PG_CONTAINER:-codebadger-postgres}"
 PG_USER="${PG_USER:-codebadger}"
 PG_DB="${PG_DB:-codebadger}"
