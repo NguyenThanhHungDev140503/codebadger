@@ -142,8 +142,9 @@ class TestCodeBadgerIntegration:
     @pytest.mark.asyncio
     @pytest.mark.timeout(10)
     async def test_server_connectivity(self, client):
-        """Test that the server is responding"""
-        await client.ping()
+        """Test that the server is responding and exposes tools."""
+        tools = await client.list_tools()
+        assert tools, "MCP server returned no tools"
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(30)
