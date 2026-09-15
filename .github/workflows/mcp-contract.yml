@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build MCP image
         run: docker build -f Dockerfile.mcp -t codebadger-mcp:latest .
+      - name: Build Joern image
+        run: docker build -f Dockerfile -t codebadger-joern-server:latest .
       - name: Start compose services
         run: docker compose up -d codebadger-postgres codebadger-redis codebadger-joern-server codebadger-mcp
       - name: Probe health endpoint
