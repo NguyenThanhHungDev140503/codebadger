@@ -75,6 +75,7 @@ jobs:
     environment: production
     permissions:
       contents: read
+      packages: read
 
     steps:
       - name: Check out deployment files
@@ -106,10 +107,13 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "$VPS_HOST" \
-            "IMAGE_TAG='$IMAGE_TAG' IMAGE_PREFIX='$IMAGE_PREFIX' bash -s" <<'REMOTE'
+            "IMAGE_TAG='$IMAGE_TAG' IMAGE_PREFIX='$IMAGE_PREFIX' GH_ACTOR='$GH_ACTOR' GH_TOKEN='$GH_TOKEN' bash -s" <<'REMOTE'
           set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
           cd /opt/codebadger
 
           previous_tag=""
