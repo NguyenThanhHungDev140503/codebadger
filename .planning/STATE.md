@@ -17,10 +17,9 @@ progress:
 
 ## Current Status
 
-- **Milestone:** v0.7 Codebase Context Backend (COMPLETED)
-- **Status:** Milestone Complete — Ready for `$gsd-new-milestone`
-- **Completion Date:** 2026-09-17
-- **Verification:** 133 tests passing across all test suites, 0 regressions, 16/16 requirements satisfied
+- **Milestone:** v0.8 Version Intelligence & Change Impact
+- **Status:** Planning — defining requirements
+- **Prior milestone:** v0.7 Codebase Context Backend completed 2026-09-17 (133 tests passing, 16/16 requirements satisfied)
 
 ## Completed Milestones
 
