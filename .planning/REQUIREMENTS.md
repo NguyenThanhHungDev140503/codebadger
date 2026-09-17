@@ -1,78 +1,61 @@
-# Requirements: CodeBadger v0.7 Codebase Context Backend
+# Requirements: CodeBadger v0.8 Version Intelligence & Change Impact
 
-**Defined:** 2026-08-09
-**Core Value:** AI agents can obtain bounded, cited, source-backed context from an immutable codebase version through a stable backend contract.
+**Defined:** 2026-09-17
+**Core Value:** An authorized AI agent can compare two immutable codebase versions and receive bounded, cited evidence of what changed and the likely structural/data-flow impact.
 
 ## v1 Requirements
 
-### Ingestion & Catalog
+### Version Comparison
 
-- [x] **INGEST-01**: An authenticated client can register a GitHub, GitLab, or Azure DevOps remote plus selected branch and explicitly synchronize it without waiting for CPG generation.
-- [x] **INGEST-02**: The system creates an immutable project version from the resolved commit SHA with content digest, manifest summary, language/build configuration, and lifecycle timestamps.
-- [x] **INGEST-03**: The system validates provider URL and branch, uses Git CLI only in an isolated workspace, keeps encrypted credentials out of URLs/config/logs/responses, and returns the existing version when the resolved commit/config is unchanged.
+- [ ] **DIFF-01**: An authenticated client can compare an ordered `base_version_id` and `target_version_id` only when both are ready, durable, build-compatible versions of the same authorized project; foreign, missing, unready, or incompatible versions receive stable sanitized errors without revealing ownership.
+- [ ] **DIFF-02**: A comparison returns deterministic added, modified, and deleted file records with stable ordering, base/target source citations where applicable, totals, returned counts, and truthful truncation/completion metadata.
+- [ ] **DIFF-03**: A comparison returns changed symbol records using source-attributed identity rather than CPG-local node IDs, including base/target citations and an explicit exact, heuristic, ambiguous, or unmatched match strategy/confidence.
 
-### CPG Lifecycle
+### Change Impact
 
-- [x] **CPG-01**: A version can enqueue exactly one durable CPG build using the existing Postgres queue and Joern worker pool.
-- [x] **CPG-02**: Clients can observe stable queued/building/loading/ready/failed/cancelled states with phase, queue position, elapsed time, retry count, and sanitized errors.
-- [x] **CPG-03**: Failed builds can be retried idempotently, cancellable work cleans partial artifacts, and startup reconciliation repairs interrupted jobs.
-- [x] **CPG-04**: Equivalent source content and build options reuse the existing content-addressed CPG cache without mutating a ready version.
+- [ ] **IMPACT-01**: An authorized client can select a valid comparison change and obtain bounded, ranked caller/callee impact evidence tied to that selected change, with citations and evidence-kind labels.
+- [ ] **IMPACT-02**: Where the language frontend supports it, a selected change can return separately bounded data-flow impact evidence; unsupported, absent, partial, budget-truncated, and timed-out results are distinguishable from a complete no-impact result.
+- [ ] **IMPACT-03**: Comparison and impact operations clamp request limits and enforce root, depth, path, row, byte, time, and concurrency budgets, reporting totals, returned results, completion reason, coverage, and truncation without exposing raw CPGQL.
 
-### Backend API
+### Public Contract & Verification
 
-- [x] **API-01**: REST endpoints support project creation, archive upload, version listing/detail, build/status, and deletion.
-- [x] **API-02**: MCP lifecycle tools call the same application services and return IDs/status schemas compatible with REST.
-- [x] **API-03**: Authentication, project/version authorization, and an audit record protect every public lifecycle and context operation.
-- [x] **API-04**: Upload/build/context operations enforce quotas, queue backpressure, correlation IDs, metrics, and sanitized operator diagnostics.
-
-### Agent Context
-
-- [x] **CTX-01**: A ready version produces an index of symbols, files, and source spans suitable for retrieval.
-- [x] **CTX-02**: Context retrieval combines exact symbol resolution, lexical search, and bounded Joern graph expansion with ranking and deduplication.
-- [x] **CTX-03**: Retrieval enforces item/byte/token/node/time budgets and explicitly reports truncation.
-- [x] **CTX-04**: Every context response includes project/version identity, immutable digest, relative file path, 1-based line range, symbol when known, and selection reason.
-- [x] **CTX-05**: Raw CPGQL remains restricted to an administrative/internal interface; public context operations expose only validated parameters.
+- [ ] **API-05**: REST and MCP comparison/impact adapters use one shared application service, schemas, and stable error vocabulary while preserving tenant isolation, authorization, quota/rate cost, audit events, correlation IDs, and sanitized diagnostics.
+- [ ] **EVAL-01**: A fixture and end-to-end regression suite covers file add/delete/modify, line shifts, overload and rename/move ambiguity, unsupported language, high-fanout/cyclic graphs, sleeping or degraded CPG recovery, budget caps, injection-shaped input, two-tenant concealment, and REST/MCP success and error parity.
 
 ## v2 Requirements
 
 - **RETR-01**: Embedding/vector retrieval and reranking for large repositories.
 - **ISOL-01**: Full multi-tenant worker sandbox with per-tenant storage isolation and quotas.
-- **DIFF-01**: Version-to-version context and change-impact comparison.
 - **OPS-01**: Kubernetes or multi-host scheduling and automated deployment pipeline.
+- **DIFF-04**: Confidence-scored rename/move detection once a representative fixture corpus proves deterministic behavior.
+- **CACHE-01**: Persistent comparison/impact cache only after operational measurements justify a versioned, tenant-safe cache key.
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| General code hosting, browsing UI, or collaboration workflows | v0.7 is an analysis/context backend, not a repository product. |
-| Archive upload as the primary sync mechanism | Continuously changing codebases are synchronized from their configured Git branch. |
-| Public unrestricted CPGQL | Joern's Scala execution surface is not a security boundary. |
-| Embedding-first vector database | Prove explainable lexical + graph retrieval first. |
-| Kubernetes/multi-host orchestration | Requires a separate infrastructure milestone. |
+| Cross-project version comparison | Violates the v0.8 project- and tenant-scoped evidence model. |
+| Raw public CPGQL or traversal access | Joern's Scala execution surface is not a public security boundary. |
+| General code hosting, PR/review workflow, or patch UI | CodeBadger remains an analysis backend. |
+| Embedding/vector database | Source-first deterministic comparison and graph evidence must be proven first. |
+| Implicit heuristic rename claims | Ambiguous identity must remain explicit until measured against fixtures. |
+| Kubernetes/multi-host orchestration | Requires a dedicated infrastructure milestone. |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INGEST-01 | Phase 5 | Satisfied |
-| INGEST-02 | Phase 5 | Satisfied |
-| INGEST-03 | Phase 5 | Satisfied |
-| CPG-01 | Phase 6 | Satisfied |
-| CPG-02 | Phase 6 | Satisfied |
-| CPG-03 | Phase 6 | Satisfied |
-| CPG-04 | Phase 6 | Satisfied |
-| API-01 | Phase 6 | Satisfied |
-| API-02 | Phase 6 | Satisfied |
-| API-03 | Phase 8 | Satisfied |
-| API-04 | Phase 8 | Satisfied |
-| CTX-01 | Phase 7 | Satisfied |
-| CTX-02 | Phase 7 | Satisfied |
-| CTX-03 | Phase 7 | Satisfied |
-| CTX-04 | Phase 7 | Satisfied |
-| CTX-05 | Phase 7 | Satisfied |
+| DIFF-01 | Phase 9 | Planned |
+| DIFF-02 | Phase 9 | Planned |
+| DIFF-03 | Phase 9 | Planned |
+| IMPACT-01 | Phase 10 | Planned |
+| IMPACT-02 | Phase 10 | Planned |
+| IMPACT-03 | Phase 10 | Planned |
+| API-05 | Phase 11 | Planned |
+| EVAL-01 | Phase 11 | Planned |
 
-**Coverage:** 16 v1 requirements; 16 mapped; 0 unmapped ✓.
+**Coverage:** 8 v1 requirements; 8 mapped; 0 unmapped ✓.
 
 ---
-*Requirements defined: 2026-08-09*
-*Last updated: 2026-09-17 after v0.7 milestone completion (16/16 requirements satisfied)*
+*Requirements defined: 2026-09-17*
+*Last updated: 2026-09-17 after v0.8 scope approval*
