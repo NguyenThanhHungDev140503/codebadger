@@ -8,18 +8,14 @@ CodeBadger is a containerized MCP (Model Context Protocol) server that gives AI 
 
 AI agents can query and analyze production codebases through CPGs with memory-safe, scalable infrastructure — enabling vulnerability discovery, taint tracking, and deep code understanding at scale.
 
-## Current Milestone: v0.7 Codebase Context Backend (Completed 2026-09-17)
+## Current Milestone: v0.8 Version Intelligence & Change Impact
 
-**Goal:** Turn CodeBadger from an MCP-only analysis surface into a backend that accepts codebases, builds versioned CPGs, and serves bounded, cited context to AI agents.
+**Goal:** Let authenticated agents compare immutable codebase versions and receive bounded, cited change-impact context without exposing raw CPGQL.
 
-**Shipped Capabilities:**
-- ✓ Secure Git remote synchronization (GitHub/GitLab/Azure) and archive upload into immutable, content-addressed versions
-- ✓ Project/version catalog with asynchronous CPG build jobs, durable queue, and idempotent retry/cancel/recovery
-- ✓ REST lifecycle API (OpenAPI 3.1.0 Swagger) with FastMCP parity
-- ✓ Semantic, cited hybrid context retrieval (exact symbols, bounded graph expansion, item/byte budgets, truncation)
-- ✓ Production authorization (JWT Bearer, permanent MCP tokens `/auth/mcp-token`), 404 fail-closed multi-tenancy, rate limiting, and structured audit logs
-
-**Status:** Completed 2026-09-17. Ready for next milestone (`$gsd-new-milestone`).
+**Target features:**
+- Deterministic version-to-version file and symbol changes with source citations
+- Bounded CPG-backed impact analysis for affected callers, callees, and data-flow relationships
+- REST/MCP parity with existing authorization, tenant isolation, quotas, audit records, and regression coverage
 
 ## Requirements
 
@@ -45,7 +41,9 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 
 ### Active
 
-- None currently active. Ready for next milestone planning (`$gsd-new-milestone`).
+- [ ] Compare two ready immutable versions and return an attributed, bounded change summary
+- [ ] Explain the likely structural and data-flow impact of a selected change
+- [ ] Deliver the comparison and impact contract consistently through REST and MCP
 
 ### Out of Scope
 
@@ -85,6 +83,23 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 | Persistent data outside images | CPGs, Postgres, logs survive redeploys via volume mounts | ✓ Good |
 | Pool worker mode as default | Isolated OOMs, per-CPG cgroup caps | ✓ Good |
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `$gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `$gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
 
-*Last updated: 2026-08-09 after starting v0.7 Codebase Context Backend*
+*Last updated: 2026-09-17 after starting v0.8 Version Intelligence & Change Impact*
