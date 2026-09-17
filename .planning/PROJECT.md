@@ -8,15 +8,18 @@ CodeBadger is a containerized MCP (Model Context Protocol) server that gives AI 
 
 AI agents can query and analyze production codebases through CPGs with memory-safe, scalable infrastructure — enabling vulnerability discovery, taint tracking, and deep code understanding at scale.
 
-## Current Milestone: v0.7 Codebase Context Backend
+## Current Milestone: v0.7 Codebase Context Backend (Completed 2026-09-17)
 
 **Goal:** Turn CodeBadger from an MCP-only analysis surface into a backend that accepts codebases, builds versioned CPGs, and serves bounded, cited context to AI agents.
 
-**Target features:**
-- Secure archive upload and staged codebase ingestion
-- Project/version catalog with asynchronous CPG build jobs
-- REST status/lifecycle API reusing the existing Joern and durable queue infrastructure
-- Semantic context retrieval exposed through REST and MCP tools
+**Shipped Capabilities:**
+- ✓ Secure Git remote synchronization (GitHub/GitLab/Azure) and archive upload into immutable, content-addressed versions
+- ✓ Project/version catalog with asynchronous CPG build jobs, durable queue, and idempotent retry/cancel/recovery
+- ✓ REST lifecycle API (OpenAPI 3.1.0 Swagger) with FastMCP parity
+- ✓ Semantic, cited hybrid context retrieval (exact symbols, bounded graph expansion, item/byte budgets, truncation)
+- ✓ Production authorization (JWT Bearer, permanent MCP tokens `/auth/mcp-token`), 404 fail-closed multi-tenancy, rate limiting, and structured audit logs
+
+**Status:** Completed 2026-09-17. Ready for next milestone (`$gsd-new-milestone`).
 
 ## Requirements
 
@@ -33,12 +36,16 @@ AI agents can query and analyze production codebases through CPGs with memory-sa
 - ✓ Auto-tuned memory with over-commit guard
 - ✓ Paper accepted at SVM Workshop @ ICSE 2026
 
+### Validated in v0.7
+
+- ✓ Secure source archive and Git remote synchronization into immutable versioned codebase snapshots (Phase 5)
+- ✓ Asynchronous CPG build tracking with durable Postgres status, retry, and cancellation semantics (Phase 6)
+- ✓ Compact, cited hybrid context retrieval with exact symbols, lexical search, and graph traversal (Phase 7)
+- ✓ Authenticated REST/MCP interfaces with JWT Bearer, permanent MCP tokens, quotas, rate limiting, and audit logs (Phase 8)
+
 ### Active
 
-- [ ] Securely upload a source archive and create a versioned codebase snapshot
-- [ ] Build and track a CPG asynchronously with durable status and retry semantics
-- [ ] Retrieve compact, cited code context using symbols, lexical search, and graph relationships
-- [ ] Expose the backend lifecycle and context capabilities through authenticated REST/MCP interfaces
+- None currently active. Ready for next milestone planning (`$gsd-new-milestone`).
 
 ### Out of Scope
 
