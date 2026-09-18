@@ -58,4 +58,4 @@
 
 ---
 *Requirements defined: 2026-09-17*
-*Last updated: 2026-09-17 after v0.8 scope approval*
+*Last updated: 2026-09-17 after v0.8 roadmap creation; all requirements are mapped exactly once.*

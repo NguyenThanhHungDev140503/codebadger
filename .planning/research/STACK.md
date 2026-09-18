@@ -1,109 +1,165 @@
-# Technology Stack
+# Stack Research
 
-**Project:** CodeBadger v0.7 — Codebase Context Backend  
-**Researched:** 2026-08-09  
-**Scope:** Backend stack additions only; this recommendation preserves the deployed Python/FastMCP/Joern/Postgres/Redis/Docker Compose architecture.
+**Domain:** Version-to-version static-code comparison and bounded CPG change-impact analysis in a multi-tenant MCP service
+**Researched:** 2026-09-17
+**Confidence:** HIGH for the existing stack and integration boundary; MEDIUM for cross-language precision, which must be tested per Joern frontend.
+
+## Recommendation in One Sentence
+
+Build v0.8 as a small Python service layer plus parameterized CPGQL templates on top of the already pinned Joern worker fleet; do **not** add a graph database, vector store, diff SaaS, or a second web framework.
+
+## Existing Primitives to Reuse
+
+| Primitive | Evidence in CodeBadger | v0.8 use |
+|---|---|---|
+| Immutable version catalog | `ProjectVersionService`, `ProjectVersion` and `project_versions`; version IDs derive from project, 40-char SHA, and build config | Validate both IDs are from the same authorized project and are `ready`; use each version ID as its CPG hash. Keep comparison results derived, not a new mutable source of truth. |
+| Durable CPG + worker lifecycle | `CpgGenerator` persists overlays; `QueryExecutor` wakes sleeping workers and serializes access per codebase | Run each side of a comparison against its existing CPG; do not rebuild CPGs to compare them. |
+| Bounded execution | `QueryExecutor` clamps timeout to 300s, rows to 10,000, stdout to 5 MB and uses a 50-result default for `reachableByFlows`; `QueryLoader` escapes Scala values and clamps numeric placeholders | Create templates exclusively through `QueryLoader`; apply smaller feature-specific limits/depths before the global ceiling. Return `total`/`returned`/`truncated` and budget information. |
+| Relationship and flow analysis | `call_graph.scala` already uses `callee`, `caller`, `callIn`, bounded BFS, and an explicitly labelled indirect-dispatch fallback; taint/slice templates use `reachableByFlows` | Extract a structured, cited impact subgraph, retaining an `evidence_kind` that distinguishes resolved graph edge, dataflow path, and indirect-dispatch heuristic. |
+| Tenant/auth/audit contract | REST `/versions/{id}/context`, lifecycle MCP `version_context`, tenant checks, auth middleware, quotas and `AuditLogger` already exist | Put REST and MCP adapters over one comparison/impact service, preserving 404-on-unauthorized behavior and emitting separate audit events. |
+| Test infrastructure | Unit contract tests for lifecycle/context/auth/audit and Docker-focused test command documented in `AGENTS.md` | Add fixture-driven tests for determinism, cross-tenant rejection, caps, and REST/MCP parity; live Joern checks stay focused. |
 
 ## Recommended Stack
 
-### Core Framework
+### Core Technologies
 
-| Technology | Version | Purpose | Why |
+| Technology | Version | Purpose | Why Recommended |
 |---|---:|---|---|
-| Python | 3.13 (already deployed) | Application runtime | Supports the existing service code and current standard-library archive safety APIs. Do not lower the project’s actual runtime to the `>=3.10` packaging floor. |
-| FastMCP | `>=3.4.2` (existing) | MCP tool surface | Keep the established MCP contracts and tool registration. FastMCP’s ASGI app can be mounted in a FastAPI application. |
-| FastAPI | `>=0.115,<1` | Authenticated REST facade and OpenAPI contract | Make FastAPI the outer ASGI app; mount FastMCP at `/mcp`, while REST owns `/v1/*`. This gives REST proper dependencies/authentication, request models, responses, and documentation without a second server process. Pin the exact compatible release in the lockfile after validating it with the installed FastMCP version. |
-| Uvicorn | `>=0.49.0` (existing) | ASGI server | Already ships with CodeBadger; serve the combined FastAPI + FastMCP app rather than running separate listeners. |
-| Pydantic | `>=2.13.4` (existing) | REST request/response schemas | Reuse for project/version/job/context DTOs and explicit, bounded query parameters. |
-| `python-multipart` | `>=0.0.20,<1` | Multipart parser required by FastAPI file endpoints | Required for `UploadFile`-based archive submission. Stream bounded chunks to a staging file; never call `read()` with no size. |
+| Python | >=3.10 (type checking targets 3.12) | Service orchestration, domain models, REST and MCP adapters | The entire catalog, authorization, worker coordination and tool surface already use Python. A new runtime would duplicate lifecycle and tenant policy. |
+| Joern CLI / CPGQL | **4.0.594**, pinned in `Dockerfile` | Per-version source/AST/CFG/PDG/call graph queries and dataflow impact | It is the project’s canonical semantic source. Official CPGQL docs support `caller`, `callee`, `callIn`, `callOut`, and dataflow steps; the existing templates already prove the API path. Keep the image pin while v0.8 ships because Joern v4 changed its internal graph backend. |
+| Eclipse Temurin JDK | **21**, pinned base image | Joern runtime | Joern upstream documents JDK 21 as the tested requirement; the current image already aligns. |
+| FastMCP + MCP | `fastmcp>=3.4.2`, `mcp>=1.27.2` | Existing authenticated MCP contract | Reuse registration and schema generation; expose no independent comparison protocol. |
+| Starlette/ASGI via FastMCP + Uvicorn | `uvicorn>=0.49.0` | Existing REST parity endpoints | Current REST routes are hosted through FastMCP/ASGI. Adding FastAPI would introduce a parallel routing and validation stack for no capability gain. |
+| PostgreSQL | **16** container; `psycopg[binary,pool]>=3.3.4` | Version catalogue, source references, audit/cache and durable work | This is already the durable tenant-scoped catalog. Store only optional bounded comparison cache metadata here if measurement justifies it; do not persist a second graph. |
+| Redis | **7** container; `redis>=8.0.0` | Cross-process coordination and durable queue support | `QueryExecutor` relies on cross-process per-codebase locking. It prevents concurrent impact traversals from piling onto the same worker. |
 
-### Database
+### Supporting Libraries and Modules
 
-| Technology | Version | Purpose | Why |
+| Library / module | Version | Purpose | When to Use |
 |---|---:|---|---|
-| PostgreSQL | 16 (existing) | Catalog, version lifecycle, jobs, citation/index records, lexical retrieval | Extend the current shared store rather than introduce Elasticsearch or a vector database. Add migrations for normalized `projects`, `project_versions`, `source_files`, `symbols`, and `context_documents`/`context_edges`; retain the existing CPG hash as the build artifact identity. |
-| PostgreSQL full-text search | Built into PostgreSQL 16 | Ranked lexical retrieval over extracted source/context chunks | Store a generated or maintained `tsvector`, query with `websearch_to_tsquery`/`plainto_tsquery`, and index it with GIN. It is explainable, transactional with version metadata, and meets the explicitly non-embedding v0.7 direction. |
-| `pg_trgm` | PostgreSQL 16 contrib extension | Symbol/file-name substring and typo-tolerant lookup | Add a GIN/GiST trigram index only on bounded name/path fields. It complements FTS, which is weak for identifiers such as `parseHTTP2Frame`. |
-| psycopg + psycopg_pool | `psycopg[binary,pool]>=3.3.4` (existing) | Postgres access and pool | Continue using the existing pooled DB manager. Add transaction-scoped repository methods and numbered SQL migrations; do not add an ORM in this milestone. |
-| Redis | 7 (existing) | Cross-process locks and Joern worker ledger | Keep it out of the new source-of-record path. PostgreSQL remains authoritative for projects, versions, jobs, and retrieval metadata. |
+| Pydantic | `>=2.13.4` | Stable request/response schemas for diff, change target and citation types | Define shared service DTOs and derive both MCP/REST boundary schemas from them; do not return raw Scala maps. |
+| `src/tools/queries/QueryLoader` | in-repo | Escapes Scala string literals; clamps limits/depth; prevents template placeholder injection | Mandatory for every new Scala template. Only bare numeric/boolean placeholders already recognised by the loader should be added deliberately and tested. |
+| `src/services/query_executor.QueryExecutor` | in-repo | Query serialization, server reactivation, timeout/error handling, output caps | Mandatory execution gateway; comparison/impact code must not instantiate Joern clients directly. |
+| `src/utils/query_rendering.escape_scala_string` | in-repo | Scala literal escaping | Indirectly via `QueryLoader`; never interpolate paths, symbols, names, or signatures with f-strings. |
+| `src/services/project_version_service.ProjectVersionService` | in-repo | Ownership/ready-state lookup | Resolve both versions through this service before CPGQL. Require same `project_id` for a two-version comparison unless a later explicitly authorized cross-project feature changes policy. |
+| `src/services/audit_logger.AuditLogger` | in-repo | Request audit trail | Audit compare/impact success and safe failure outcomes at the adapter boundary, matching lifecycle routes. |
+| OpenTelemetry API/SDK/OTLP | `>=1.42.1` | Existing tracing | Add spans/attributes for compare and impact latency, result counts, truncation and error class; never attach source code or unbounded symbol text. |
+| pytest + pytest-asyncio | `9.0.3`, `1.4.0` | Contract and focused regression tests | Use deterministic miniature source fixtures for file/symbol delta and controlled CPG fixture for impact traversal. |
 
-### Infrastructure
+### Development Tools
 
-| Technology | Version | Purpose | Why |
-|---|---:|---|---|
-| Docker Compose | v2 (existing) | Single-host deployment | Extend the current service rather than split REST and MCP into containers. Continue mounting persistent `playground/`, `pgdata/`, and `logs/` as documented. |
-| Joern | Existing pinned image/build | CPG build and graph relationship retrieval | Preserve the memory-aware, cgroup-capped worker pool. Context retrieval calls a narrow `ContextService` over the existing query executor; it must not expose raw CPGQL to REST callers. |
-| Filesystem staging volume | Existing `playground/` volume, with new `uploads/` and `snapshots/` subtrees | Archive quarantine and immutable source snapshots | Stage outside any directory directly visible to a Joern worker until validation completes; then atomically promote a validated, symlink-free snapshot. Future isolation should mount only that version’s snapshot into its worker. |
+| Tool | Purpose | Notes |
+|---|---|---|
+| Docker Compose | Reproduce MCP + Joern + Postgres + Redis topology | Use the project’s existing image and `JOERN_WORKER_MODE=pool`; do not build/rebuild CPGs as routine tests. |
+| `docker run ... codebadger-mcp:latest pytest -q` | Focused regression verification | Run only the new focused tests first, as prescribed in `AGENTS.md`. |
+| mypy / Black / isort / flake8 | Existing quality checks | New DTO and service code should preserve strict typing; current `mypy` target is Python 3.12 even though runtime floor is 3.10. |
 
-### Supporting Libraries
-
-| Library | Version | Purpose | When to Use |
-|---|---:|---|---|
-| `zipfile`, `tarfile`, `pathlib`, `hashlib`, `secrets` (stdlib) | Python 3.13 | Archive inspection, safe manual extraction, SHA-256, constant-time API-token comparison | Use instead of an archive-extraction dependency. v0.7 should accept **ZIP only** initially; if TAR support is added later, use `tarfile` with `filter="data"` and the same member/size/path policy. |
-| `tempfile` + `os.replace` (stdlib) | Python 3.13 | Private staging directory and atomic promotion | Write the upload to a random staging path; validate before extracting; promote only after all checks and manifest creation succeed. |
-| `asyncio` + existing `DurableCPGQueue` | Python 3.13 / existing | Asynchronous CPG builds, retry/status behavior | Reuse the current Postgres-backed queue (`FOR UPDATE SKIP LOCKED`, dedup, bounded depth). Add `index_source` as a job type or make it a durable post-build step. Do **not** add Celery, RQ, Dramatiq, or a second Redis queue. |
-| Existing `CodeBrowsingService` + `QueryExecutor` | existing | Symbol and graph retrieval | Reuse their bounded Joern calls. Build a new `ContextService` that merges PostgreSQL lexical hits, symbol metadata, and explicitly whitelisted graph-neighbor queries into compact cited passages. |
-
-## Recommended Integration Shape
+## Implementation Shape
 
 ```text
-Client
-  ├─ HTTPS + Bearer/API token ──> FastAPI /v1/projects, /versions, /jobs, /context
-  │                                ├─ archive staging + manifest
-  │                                ├─ Postgres catalog / lexical indexes
-  │                                └─ existing DurableCPGQueue ──> Joern build/index work
-  └─ MCP ───────────────────────> mounted FastMCP /mcp ──> same service layer
-
-ContextService = lexical candidates (Postgres FTS + trigrams)
-                 + symbol lookup (Postgres)
-                 + bounded CPG neighbor enrichment (Joern)
-                 -> ranked, size-capped citations {project, version, path, line_start, line_end, symbol}
+REST compare/impact route     MCP compare/impact tool
+             \                 /
+              shared VersionComparisonService
+                 |        |
+   ProjectVersionService    AuditLogger / shared response DTOs
+                 |
+         QueryLoader templates -> QueryExecutor
+                              -> ready CPG A / ready CPG B
+                              -> Joern 4.0.594 workers
 ```
 
-Make the service layer—not REST handlers or MCP tools—the sole owner of lifecycle and context logic. Both facades must call the same authentication/authorization policy and return the same stable project-version identifiers.
+1. A **comparison service** validates ownership/readiness, obtains deterministic per-version file and symbol inventories, normalizes them in Python, and produces stable added/modified/deleted records with source locations and version digests.
+2. An **impact service** consumes one cited changed symbol/location, executes structured call/dataflow templates only against the selected ready version, ranks/caps results, and marks evidence as exact or heuristic.
+3. REST and MCP remain thin adapters. They must share input validation, error mapping, response DTOs, authorization check ordering, quota behavior, and audit event names.
 
-## Exact Additions to `requirements.txt`
+For v0.8, retrieve both inventories at request time. Add a Postgres cache only after measurements show repeated full-inventory queries dominate latency; cache keys must include both version IDs, query-template revision, limit/depth and tenant visibility assumptions.
+
+## Installation
+
+No package installation is recommended for this milestone. The required stack is already present in `requirements.txt` and Compose.
 
 ```bash
-# REST facade and multipart uploads
-pip install "fastapi>=0.115,<1" "python-multipart>=0.0.20,<1"
+# Focused verification after implementing v0.8 tests
+docker run --rm -v "$PWD:/workspace" -w /workspace \
+  codebadger-mcp:latest pytest -q tests/unit/services tests/unit/api
 ```
 
-No queue, ORM, archive, search-engine, embedding, or vector-database dependency is justified for v0.7. Before implementation, resolve and lock the FastAPI/FastMCP compatible versions together in a reproducible constraints/lock file; the repository currently records ranges, not a lockfile.
-
-## Security and Archive-Handling Requirements
-
-1. Support ZIP only for the first contract. Reject encrypted archives, unsupported compression methods, duplicate normalized paths, absolute paths, `..` traversal, device/FIFO entries, symlinks/hardlinks, and ambiguous Unicode/control-character names.
-2. Apply limits before and during extraction: request `Content-Length` if present, streamed compressed-byte cap, maximum member count, per-member uncompressed cap, total uncompressed cap, path-depth cap, and compression-ratio cap. Do not trust the filename or MIME type.
-3. Extract member-by-member to a mode-`0700` staging directory using canonical destination checks; do not use `extractall()`. Hash the received archive and produce a deterministic source manifest before enqueueing work.
-4. Make upload idempotency explicit: a client idempotency key and/or `(project_id, archive_sha256)` unique constraint must return the existing version/job rather than enqueueing another CPG build.
-5. Authenticate all `/v1/*` endpoints with a FastAPI dependency. For v0.7, use one configured opaque bearer token checked with `secrets.compare_digest` (or an already-managed reverse-proxy identity); do not claim user/tenant authorization before a real identity model exists. Put the mounted MCP path behind the same perimeter/auth policy. Keep `/health` unauthenticated only if it exposes no sensitive details.
+If a deliberate Joern upgrade is scheduled separately, update the Dockerfile pin, rebuild the image, and rerun the cross-language CPG fixture suite. It is not a v0.8 prerequisite.
 
 ## Alternatives Considered
 
-| Category | Recommended | Alternative | Why Not |
-|---|---|---|---|
-| REST facade | FastAPI outer app + mounted FastMCP | FastMCP custom routes only | FastMCP documents custom health routes as deliberately outside its authentication middleware; authenticated REST endpoints belong in FastAPI’s dependency model. |
-| Background jobs | Existing Postgres durable queue | Celery/RQ/Dramatiq | The current queue already has DB durability, deduplication, restart recovery, backpressure, and multi-worker-safe claims. Another queue creates split status and retry truth. |
-| Archive format | ZIP-only + stdlib validation | ZIP + TAR + 7z from day one | More parsers and link semantics multiply the attack surface. Add TAR only after archive policy tests cover it; do not accept 7z in v0.7. |
-| Indexing | PostgreSQL FTS + `pg_trgm` + Joern | Elasticsearch/OpenSearch | A separate search cluster is unjustified before corpus scale or relevance needs demonstrate it; PostgreSQL keeps version/citation consistency transactional. |
-| Semantic retrieval | Lexical + symbols + bounded CPG links | Embeddings/vector database | The milestone explicitly defers embedding-first retrieval. Graph relationships supply structural context while lexical ranking remains inspectable. |
-| Data layer | psycopg repositories + SQL migrations | SQLAlchemy/Alembic introduction | The project is already psycopg-based. A thin migration runner and focused repositories minimize a broad persistence rewrite during a contract-establishing milestone. |
+| Recommended | Alternative | When to Use Alternative |
+|---|---|---|
+| Structured CPGQL templates + Python normalizer | Raw user-provided CPGQL | Never for this public feature. Raw queries defeat stable contract, tenant-safe bounds, and citation semantics. Keep raw CPGQL only in its existing constrained diagnostic surface. |
+| Existing Joern CPGs | Neo4j / a separate graph database | Only if a later product requires long-lived cross-repository graph joins that Joern workers cannot serve. v0.8 compares two CPGs already held and managed by CodeBadger. |
+| Existing Postgres version catalog | External Git diff service or a generic diff library as authoritative source | Only for a later source-text-only feature that must operate without CPGs. Here, version and CPG readiness must stay aligned; a new source of truth invites mismatches. |
+| FastMCP/Starlette routes | FastAPI application | Only for a broad independent HTTP product rewrite. v0.8 needs parity beside existing routes, not duplicate middleware and OpenAPI ownership. |
+| Request-time inventory | Persisted derived symbol index | Only after measured latency/worker cost establishes it. A new index entails invalidation by build config, Joern version, overlays and tenant authorization. |
+| Existing OTLP instrumentation | A new observability vendor SDK | Only if operations adopt it platform-wide. Existing OpenTelemetry keeps the feature vendor-neutral. |
 
-## Implementation Notes and Version Risks
+## What NOT to Use
 
-- `main.py` currently calls `mcp.run_http_async()` and exposes only FastMCP custom routes. Replace that boot path with a combined ASGI app: create `mcp.http_app(path="/mcp")`, create a FastAPI app with the combined lifespan, and mount/include the MCP routes. Preserve the existing concurrency limiter around both publicly reachable facades, with a separate upload byte/concurrency limit if necessary.
-- The current jobs schema has only `queued/running/done/failed`, JSON stored as `TEXT`, and requeues every `running` job at startup. It is sufficient for builds but needs an explicit retry policy (`max_attempts`, retryable error classification, next-at/lease metadata) before exposing retries as an API guarantee. That is a schema migration, not a queue-framework switch.
-- Current codebase catalog keys only by hash. v0.7 needs a stable `project_id` and immutable `version_id`, so two projects can intentionally reference identical content without collapsing their catalog history. Keep content SHA/CPG cache keys as deduplication artifacts, not as the public version identity.
-- Source indexing must run only on the validated promoted snapshot and must store file/line ranges that remain correct for that immutable version. Citation payloads should be first-class structured data, never inferred from Joern text after the fact.
+| Avoid | Why | Use Instead |
+|---|---|---|
+| Unbounded `reachableByFlows`, BFS, or `.l` materialization | Dataflow expands rapidly and can monopolize the one-query-per-CPG worker; no global cap makes payloads non-deterministic. | Feature-specific `max_depth`, `max_nodes`, `max_paths`, byte budget, plus existing QueryExecutor limits and truncation fields. |
+| Direct f-string CPGQL | Symbols and paths can alter Scala syntax or template semantics, and policy clamps are bypassed. | `QueryLoader.load()` plus its escaped string and numeric placeholder rules. |
+| Diffing raw Joern internal node IDs across versions | Node IDs are build-local and do not form a stable cross-version identity. | Stable file path + qualified/signature/name + source span fingerprint; label unmatched/ambiguous mappings honestly. |
+| Treating every caller/callee as an exact fact | Dynamic dispatch, callbacks, macros and incomplete frontend resolution may yield missing/heuristic edges. | Evidence kind and citation fields; retain the current address-taken fallback only as a labelled heuristic. |
+| Joern version upgrade in this feature | Upstream Joern 4 changed from OverflowDB to FlatGraph, so a bump can change traversal behavior and serialized CPG compatibility. | Keep 4.0.594 pinned for v0.8; make future upgrades a separately tested migration. |
+| Vector DB / embedding reranker | It does not establish deterministic version delta or graph evidence, while it adds an unrelated operational surface. | Defer to the existing RETR backlog after v0.8’s reliable structured baseline. |
+
+## Stack Patterns by Variant
+
+**If both versions are ready and have the same project/build configuration:**
+
+- Use the shared comparison service and fetch structural inventories from each CPG.
+- Because that maintains the immutable-version/CPG correspondence and avoids filesystem or Git-side assumptions.
+
+**If a version is unauthorized, belongs to another project, or is not `ready`:**
+
+- Stop before touching a worker; surface the established safe not-found/validation contract and audit the attempt.
+- Because querying first could leak whether a CPG exists and wastes constrained worker capacity.
+
+**If file/symbol inventory is too large for the request budget:**
+
+- Use a deterministic sort order, return the first bounded page, and state `total`, `returned`, budget and `truncated`.
+- Because stable incomplete output is actionable; implicit output clipping is not.
+
+**If the changed target is a source location but not a uniquely resolvable method:**
+
+- Return a source citation and a bounded file-level/nearby-symbol result, or a stable `TARGET_NOT_RESOLVED` response; do not invent a symbol identity.
+- Because CPG node coverage and frontend fidelity vary by language and build configuration.
+
+**If the request asks for dataflow impact:**
+
+- Require a narrow resolved target and use persisted dataflow overlays with a smaller per-feature path/node/timeout budget than the global maximum.
+- Because the codebase already identifies `reachableByFlows` as expensive and performs overlay persistence specifically to protect query workers.
+
+## Version Compatibility
+
+| Package / component | Compatible With | Notes |
+|---|---|---|
+| Joern **4.0.594** | Eclipse Temurin **21**, Ubuntu Noble | Exact project image combination. Upstream states JDK 21 is the tested requirement; do not lower the JDK image. |
+| Joern v4 CPGQL | Existing `call_graph.scala`, dataflow templates and persisted overlays | v4’s FlatGraph migration means validate every template and fixture after any Joern upgrade. |
+| Python >=3.10 | Pydantic v2 / current source annotations | The repository uses PEP 604 unions; avoid syntax or library changes that narrow compatibility below the published Python floor. |
+| FastMCP >=3.4.2 + MCP >=1.27.2 | Existing registration and ASGI REST routes | Preserve this pairing during v0.8; no evidence supports an upgrade need for compare/impact. |
+| PostgreSQL 16 + psycopg pool >=3.3.4 | Existing durable catalog | Reuse connections through `PostgresDBManager`; no schema is necessary unless a measured cache is introduced. |
+| Redis 7 + redis-py >=8.0.0 | Existing coordinator / pool workers | The cross-process lock remains essential when compare/impact makes multiple CPG calls. |
+
+## Research Notes and Validation Priorities
+
+- `Dockerfile` pins Joern 4.0.594, while the upstream release page currently displays 4.0.592 as latest. Treat the checked-in pin as the compatibility baseline, not a signal to downgrade or automatically upgrade.
+- The source already documents C/C++ macro/include sensitivity and an explicit indirect-call fallback. Cross-version symbol matching and impact tests must include at least one direct-call, callback/virtual-dispatch, and preprocessor-gated fixture.
+- Joern official docs establish the traversal vocabulary, but they do not guarantee identical resolution across every frontend. Therefore the service contract should distinguish empty, unresolved, exact, and heuristic evidence rather than claiming global semantic completeness.
 
 ## Sources
 
-- [FastMCP + FastAPI integration](https://gofastmcp.com/integrations/fastapi) — **HIGH**: documents creating `mcp.http_app()` and combining/mounting it with a FastAPI application and lifespan.
-- [FastMCP HTTP deployment / custom routes](https://gofastmcp.com/deployment/http) — **HIGH**: states custom routes such as health checks are intentionally excluded from FastMCP authentication middleware; use FastAPI for authenticated HTTP endpoints.
-- [FastAPI request files](https://fastapi.tiangolo.com/tutorial/request-files/) — **HIGH**: `UploadFile` is the supported multipart-upload type; multipart support is required.
-- [FastAPI `UploadFile.read`](https://fastapi.tiangolo.com/reference/uploadfile/) — **HIGH**: asynchronous `read(size)` API; bounded chunk reads support streaming to staging.
-- [FastAPI security reference](https://fastapi.tiangolo.com/reference/security/) — **HIGH**: `HTTPBearer` dependency support for bearer-token extraction.
-- [Python `zipfile` documentation](https://docs.python.org/3/library/zipfile.html) and [Python `tarfile` extraction filters](https://docs.python.org/3/library/tarfile.html#extraction-filters) — **HIGH**: standard-library archive APIs and Python’s archive-extraction safety guidance.
-- [PostgreSQL full-text search](https://www.postgresql.org/docs/16/textsearch.html) and [`pg_trgm`](https://www.postgresql.org/docs/16/pgtrgm.html) — **HIGH**: PostgreSQL-native lexical search and trigram indexing.
-- Local evidence: `requirements.txt`, `main.py`, `src/utils/postgres_job_store.py`, `src/utils/postgres_db_manager.py`, `src/tools/core_tools.py`, `src/services/code_browsing_service.py`, and `docs/architecture.md` — **HIGH** for current-codebase observations.
+- [CodeBadger Dockerfile](../../Dockerfile) — exact Joern 4.0.594, Temurin 21/Noble and Rust runtime pin (HIGH, checked-in implementation).
+- [CodeBadger dependencies](../../requirements.txt) and [Compose topology](../../docker-compose.yml) — installed runtime, Postgres 16, Redis 7, worker-mode configuration (HIGH, checked-in implementation).
+- [ProjectVersionService](../../src/services/project_version_service.py), [ContextRetrievalService](../../src/services/context_retrieval_service.py), [QueryExecutor](../../src/services/query_executor.py), [QueryLoader](../../src/tools/queries/__init__.py), and [call graph template](../../src/tools/queries/call_graph.scala) — reusability and bounds/security behavior (HIGH, checked-in implementation).
+- [Joern CPGQL complex steps](https://docs.joern.io/cpgql/complex-steps/) and [call traversals](https://docs.joern.io/cpgql/calls/) — `caller`/`callee`/`callIn` and dataflow traversal semantics (HIGH, official docs checked 2026-09-17).
+- [Joern repository](https://github.com/joernio/joern) and [releases](https://github.com/joernio/joern/releases) — JDK 21 requirement and Joern 4 FlatGraph migration/release cadence (HIGH, official upstream).
+
+---
+*Stack research for: CodeBadger v0.8 — Version Intelligence & Change Impact*
+*Researched: 2026-09-17*

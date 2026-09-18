@@ -14,5 +14,8 @@
     "mvp_mode": false,
     "context_coverage_gate": true,
     "post_planning_gaps": true
+  },
+  "graphify": {
+    "enabled": true
   }
 }
