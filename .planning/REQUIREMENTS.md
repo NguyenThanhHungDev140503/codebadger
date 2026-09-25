@@ -20,6 +20,7 @@
 ### Public Contract & Verification
 
 - [ ] **API-05**: REST and MCP comparison/impact adapters use one shared application service, schemas, and stable error vocabulary while preserving tenant isolation, authorization, quota/rate cost, audit events, correlation IDs, and sanitized diagnostics.
+- [ ] **API-06**: Every public MCP lifecycle, context, comparison, and impact operation derives tenant scope and admin privileges solely from the verified caller identity. A conflicting caller-supplied `owner_scope` fails closed with the same concealed not-found semantics as REST, and cross-tenant access is allowed only for a verified admin role.
 - [ ] **EVAL-01**: A fixture and end-to-end regression suite covers file add/delete/modify, line shifts, overload and rename/move ambiguity, unsupported language, high-fanout/cyclic graphs, sleeping or degraded CPG recovery, budget caps, injection-shaped input, two-tenant concealment, and REST/MCP success and error parity.
 
 ## v2 Requirements
@@ -52,10 +53,11 @@
 | IMPACT-02 | Phase 10 | Planned |
 | IMPACT-03 | Phase 10 | Planned |
 | API-05 | Phase 11 | Planned |
+| API-06 | Phase 9 | Planned |
 | EVAL-01 | Phase 11 | Planned |
 
-**Coverage:** 8 v1 requirements; 8 mapped; 0 unmapped ✓.
+**Coverage:** 9 v1 requirements; 9 mapped; 0 unmapped ✓.
 
 ---
 *Requirements defined: 2026-09-17*
-*Last updated: 2026-09-17 after v0.8 roadmap creation; all requirements are mapped exactly once.*
+*Last updated: 2026-09-26 to make authenticated MCP tenant binding an explicit v0.8 requirement.*
