@@ -117,21 +117,62 @@ def build_openapi_schema() -> dict:
             "/auth/mcp-token": {
                 "post": {
                     "summary": "Generate a permanent non-expiring JWT token specifically for MCP clients",
-                    "requestBody": {"required": True, "content": {"application/json": {}}},
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["username", "password"],
+                                    "properties": {
+                                        "username": {"type": "string"},
+                                        "password": {"type": "string", "format": "password", "writeOnly": True},
+                                    },
+                                }
+                            }
+                        },
+                    },
                     "responses": {"200": {"description": "MCP token generated"}, "401": {"description": "Invalid credentials"}}
                 }
             },
             "/auth/login": {
                 "post": {
                     "summary": "Authenticate user credentials and receive JWT access/refresh tokens",
-                    "requestBody": {"required": True, "content": {"application/json": {}}},
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["username", "password"],
+                                    "properties": {
+                                        "username": {"type": "string"},
+                                        "password": {"type": "string", "format": "password", "writeOnly": True},
+                                    },
+                                }
+                            }
+                        },
+                    },
                     "responses": {"200": {"description": "Authenticated"}, "401": {"description": "Invalid credentials"}}
                 }
             },
             "/auth/refresh": {
                 "post": {
                     "summary": "Refresh JWT access token",
-                    "requestBody": {"required": True, "content": {"application/json": {}}},
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["refresh_token"],
+                                    "properties": {
+                                        "refresh_token": {"type": "string", "writeOnly": True},
+                                    },
+                                }
+                            }
+                        },
+                    },
                     "responses": {"200": {"description": "Token refreshed"}, "401": {"description": "Invalid refresh token"}}
                 }
             },

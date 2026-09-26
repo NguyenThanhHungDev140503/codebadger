@@ -55,6 +55,25 @@ def test_public_endpoints_whitelist(api_env):
     assert resp.json() == {"status": "up"}
 
 
+def test_auth_openapi_request_bodies_define_input_schemas(api_env):
+    client, _, _ = api_env
+
+    schema = client.get("/openapi.json").json()
+    paths = schema["paths"]
+
+    for path in ("/auth/login", "/auth/mcp-token"):
+        request_schema = paths[path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        assert request_schema["type"] == "object"
+        assert request_schema["required"] == ["username", "password"]
+        assert request_schema["properties"]["username"]["type"] == "string"
+        assert request_schema["properties"]["password"]["format"] == "password"
+
+    refresh_schema = paths["/auth/refresh"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    assert refresh_schema["type"] == "object"
+    assert refresh_schema["required"] == ["refresh_token"]
+    assert refresh_schema["properties"]["refresh_token"]["type"] == "string"
+
+
 def test_protected_endpoint_missing_token(api_env):
     client, _, _ = api_env
     resp = client.get("/projects")
